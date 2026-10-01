@@ -13,6 +13,7 @@ expect_ok()   { local n=$1; shift; if "$@" >/dev/null 2>&1; then ok "$n"; else b
 expect_fail() { local n=$1; shift; if "$@" >/dev/null 2>&1; then bad "$n (should fail)"; else ok "$n"; fi; }
 
 # --- test tree: text, binary, duplicates, empty file, empty dir, unicode name, symlinks
+# (the Korean folder/file names and text are deliberate: they exercise non-ASCII UTF-8 paths)
 mkdir -p src/deep/er src/emptydir src/한글폴더
 for i in $(seq 1 300); do echo "line $i: the quick brown fox jumps over the lazy dog $((i*i))"; done > src/text.txt
 head -c 300000 /dev/urandom > src/random.bin

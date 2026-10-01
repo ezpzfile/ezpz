@@ -46,11 +46,11 @@ def methods(ds):
          f"7z x -bd -bso0 -mmt={J} -o{{dest}} {a('7z')}", f"7z e -bd -so {a('7z')} {{path}} > /dev/null"),
         ("ezpz -l 3", a("l3.ezpz"), f"{EZ} c {a('l3.ezpz')} {ds} -l 3 -j{J}",
          f"{EZ} x {a('l3.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('l3.ezpz')} {{path}} > /dev/null"),
-        ("ezpz (기본 -l 7)", a("l7.ezpz"), f"{EZ} c {a('l7.ezpz')} {ds} -l 7 -j{J}",
+        ("ezpz (default -l 7)", a("l7.ezpz"), f"{EZ} c {a('l7.ezpz')} {ds} -l 7 -j{J}",
          f"{EZ} x {a('l7.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('l7.ezpz')} {{path}} > /dev/null"),
         ("ezpz -l 9", a("l9.ezpz"), f"{EZ} c {a('l9.ezpz')} {ds} -l 9 -j{J}",
          f"{EZ} x {a('l9.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('l9.ezpz')} {{path}} > /dev/null"),
-        ("ezpz --max (뇌)", a("max.ezpz"), f"{EZ} c {a('max.ezpz')} {ds} --max -j{J}",
+        ("ezpz --max (brain)", a("max.ezpz"), f"{EZ} c {a('max.ezpz')} {ds} --max -j{J}",
          f"{EZ} x {a('max.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('max.ezpz')} {{path}} > /dev/null"),
     ]
 

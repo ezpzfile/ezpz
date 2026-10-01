@@ -1,178 +1,180 @@
-# EZPZ 아카이브 포맷 규격 v1.0 (초안)
+# EZPZ archive format specification v1.0 (draft)
 
-- 파일 확장자: `.ezpz`
-- MIME 타입(제안): `application/x-ezpz`
-- 상태: 초안(Draft). 레퍼런스 구현은 이 저장소의 `ezpz` (Rust)
-- 작성일: 2026-10-01
+English | [한국어](SPEC.ko.md)
+
+- File extension: `.ezpz`
+- Media type (proposed): `application/x-ezpz`
+- Status: draft. The reference implementation is `ezpz` (Rust) in this repository.
+- Date: 2026-10-01
 
 ---
 
-## 0. 한눈에 보기
+## 0. Overview
 
-`.ezpz`는 여러 파일과 폴더를 하나로 묶고 줄이는 **아카이브 포맷**이에요. zip이나 7z와 같은 종류지만, 지난 30년 동안 따로따로 발전해 온 좋은 아이디어들을 한 그릇에 모았고, 거기에 직접 만든 **뇌 코덱**을 더했어요.
+`.ezpz` is an archive format: it packs files and folders into one file and compresses them, like zip or 7z. It brings together techniques that grew up separately in other formats and adds a codec of its own, the brain codec.
 
-| 기능 | zip | 7z | tar.zst | **ezpz** |
+| Feature | zip | 7z | tar.zst | **ezpz** |
 |---|---|---|---|---|
-| 여러 파일을 이어서 같이 압축(솔리드) | ✗ | ✓ | ✓ | ✓ (블록 단위) |
-| 파일 하나만 빨리 꺼내기 | ✓ | △ (블록 단위) | ✗ (처음부터 풀어야 함) | ✓ (필요한 블록만) |
-| 같은 내용을 한 번만 저장(중복 제거) | ✗ | △¹ | △¹ | ✓ (내용 기반 조각, 거리 무관) |
-| 이미 압축된 파일(jpg, mp4…) 건너뛰기 | ✗ | △ | ✗ | ✓ (자동 판별) |
-| 실행 파일 전용 전처리 | ✗ | ✓ | ✗ | ✓ (x86, ARM64) |
-| 여러 코어로 동시에 압축·해제 | ✗ | △ | ✓ | ✓ |
-| 파일 이름까지 숨기는 암호화 | ✗ | ✓ | ✗ | ✓ |
-| 암호화된 채로, 비밀번호 없이 손상 검사 (서명이 있으면 변조까지) | ✗ | ✗ | ✗ | ✓ |
-| 전자 서명(키 주인이 이 내용을 승인했다는 증명) | ✗ | ✗ | ✗ | ✓ (Ed25519) |
-| 학습하는 예측 코덱 | ✗ | ✗ | ✗ | ✓ (뇌 코덱, 최대 압축 모드) |
+| Compresses files together (solid) | ✗ | ✓ | ✓ | ✓ (per block) |
+| Fast extraction of a single file | ✓ | △ (per block) | ✗ (decompresses from the start) | ✓ (reads only the blocks it needs) |
+| Stores identical content once (deduplication) | ✗ | △¹ | △¹ | ✓ (content-defined chunks, any distance) |
+| Skips already-compressed files (jpg, mp4, ...) | ✗ | △ | ✗ | ✓ (detected automatically) |
+| Preprocessing for executables | ✗ | ✓ | ✗ | ✓ (x86, ARM64) |
+| Multi-core compression and extraction | ✗ | △ | ✓ | ✓ |
+| Encryption that also hides file names | ✗ | ✓ | ✗ | ✓ |
+| Damage check on an encrypted archive without the password (tamper check too when signed) | ✗ | ✗ | ✗ | ✓ |
+| Digital signature (proof that a key holder approved this content) | ✗ | ✗ | ✗ | ✓ (Ed25519) |
+| Prediction codec that learns as it runs | ✗ | ✗ | ✗ | ✓ (brain codec, maximum compression mode) |
 
-¹ 같은 내용이 압축기의 기억 범위(사전·윈도, 보통 수십~수백 MiB) 안에 있을 때만 줄어들어요.
+¹ Repeated content shrinks only when it falls inside the compressor's memory (its dictionary or window, typically tens to hundreds of MiB).
 
-### 쉬운 말로 풀면
+### In plain words
 
-- **블록**: 파일들을 비슷한 것끼리 줄 세워서 이어 붙인 뒤, 일정 크기(예: 32 MiB)마다 잘라서 각각 압축해요. 이어 붙이면 파일 사이의 공통점까지 줄일 수 있고(솔리드), 잘라 두면 파일 하나를 꺼낼 때 그 파일이 든 블록만 풀면 돼요.
-- **중복 제거**: 파일 내용을 "내용이 정하는 경계"에서 조각내요. 그래서 같은 내용은 어디에 있든 같은 조각이 되고, 그 조각은 한 번만 저장해요. 같은 프로젝트의 여러 버전을 묶을 때 크게 효과가 나요.
-- **무결성 사슬**: 맨 끝의 트레일러가 헤더와 인덱스를 합친 지문(해시)을 갖고, 인덱스는 모든 블록의 지문을 가져요. 그래서 실수로 생긴 손상은 1바이트라도 바로 들켜요. 다만 지문은 누구나 다시 계산할 수 있어서, **누군가 일부러 고친 것**까지 막으려면 서명(또는 따로 보관해 둔 지문)이 필요해요. 서명은 이 사슬의 꼭대기에 찍혀요.
-- **뇌 코덱**: 다음 비트를 미리 예측하고, 예측이 빗나간 만큼만 저장해요. 여러 개의 작은 예측기가 각자 의견을 내고, 작은 신경망이 "지금은 누구 말을 믿을지"를 실시간으로 배워요. 압축하는 쪽과 푸는 쪽이 똑같이 배우는 쌍둥이라서, 배운 내용을 파일에 넣을 필요가 없어요.
+- **Blocks.** Files are sorted so that similar ones sit next to each other, joined end to end, and cut into blocks of a fixed size (for example 32 MiB) that are compressed separately. Joining them lets the compressor use similarities between files (solid compression). Cutting them into blocks means that extracting one file only requires decompressing the blocks that contain it.
+- **Deduplication.** File contents are split at boundaries chosen by the content itself, so identical content becomes identical chunks wherever it appears, and each chunk is stored once. This pays off most when an archive holds several versions of the same project.
+- **Integrity chain.** The trailer at the end holds a hash of the header and the index, and the index holds a hash of every block, so accidental damage to even one byte is always detected. Anyone can recompute these hashes, though. Detecting deliberate changes needs a signature, or a copy of the hash kept somewhere trusted. The signature sits at the top of the chain.
+- **Brain codec.** It predicts each bit before coding it and stores only how far the prediction was off. Several small predictors each give an estimate, and a small neural network learns, as it goes, which of them to trust in the current situation. The compressor and the decompressor learn in exactly the same way, like twins, so the learned model never has to be stored in the file.
 
 ---
 
-## 1. 표기와 기본 규칙
+## 1. Conventions
 
-- **반드시(MUST)**, **하면 안 됨(MUST NOT)**, **권장(SHOULD)**, **선택(MAY)** 은 RFC 2119의 뜻을 따릅니다.
-- 모든 고정 길이 정수는 **리틀 엔디언**입니다. 예외: 뇌 코덱의 산술 부호 비트열은 바이트 열 자체가 앞에서부터 상위 바이트 순(빅 엔디언)으로 읽고 씁니다(§6.4.10).
-- `u8/u16/u32/u64`: 부호 없는 정수. `i32/i64`: 2의 보수 부호 있는 정수.
-- `>>` 는 부호 있는 값에서 **산술 시프트**(내림)입니다. `/` 는 0 방향 정수 나눗셈입니다.
-- **varint**: LEB128 부호 없는 정수(최대 64비트, 최대 10바이트). 하위 7비트씩, 이어지면 최상위 비트 1. 인코더는 최소 길이로 써야 합니다(MUST). 디코더는 최소 길이가 아닌 표현(불필요한 0x00 바이트로 끝나는 varint)과 64비트를 넘는 값을 거부해야 합니다(MUST). 그래야 모든 디코더가 같은 파일을 똑같이 판정해요.
-- **svarint**: i64를 zigzag 부호화한 뒤 varint. 부호화 `u = (v << 1) ^ (v >> 63)`, 복호화 `v = (u >> 1) ^ -(u & 1)` (모두 64비트).
-- **BLAKE3**: BLAKE3-256. 특별히 적지 않으면 32바이트 출력입니다.
-- 오프셋은 파일 시작 기준 바이트 위치입니다.
-- 별도 언급이 없는 u32 덧셈·곱셈(특히 §6.4의 해시 입력 계산)은 mod 2^32로 감쌉니다(wrap).
+- **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as defined in RFC 2119.
+- All fixed-size integers are little-endian. One exception: the brain codec's arithmetic-coded bit stream is read and written most significant byte first (big-endian), see §6.4.10.
+- `u8/u16/u32/u64` are unsigned integers; `i32/i64` are two's-complement signed integers.
+- `>>` on signed values is an arithmetic shift (it rounds down). `/` is integer division that truncates toward zero.
+- **varint**: unsigned LEB128, at most 64 bits and at most 10 bytes. Seven bits per byte, low bits first, with the high bit set when more bytes follow. Encoders MUST write the shortest form. Decoders MUST reject non-minimal forms (a varint that ends in an unnecessary 0x00 byte) and values above 64 bits, so that every decoder judges a given file the same way.
+- **svarint**: an i64 zigzag-encoded, then written as a varint. Encode `u = (v << 1) ^ (v >> 63)`, decode `v = (u >> 1) ^ -(u & 1)` (all 64-bit).
+- **BLAKE3** means BLAKE3-256 with a 32-byte output unless stated otherwise.
+- Offsets are byte positions from the start of the file.
+- Unless stated otherwise, u32 additions and multiplications (in particular the hash inputs in §6.4) wrap modulo 2^32.
 
-## 2. 파일 전체 구조
+## 2. File layout
 
 ```
-오프셋 0
-┌──────────────────────────────┐
-│ 헤더  (32 + E 바이트)          │  §3, §4
-├──────────────────────────────┤
-│ 데이터 블록 프레임 0            │  §5
-│ 데이터 블록 프레임 1            │
-│ ...  (빈틈 없이 연속)           │
-├──────────────────────────────┤ ← index_offset
-│ 블록 테이블 프레임 (암호화 안 함) │  §7
-│ 카탈로그 프레임 (암호화 가능)    │  §8
-├──────────────────────────────┤
-│ 서명 섹션 (104 바이트, 선택)     │  §10
-├──────────────────────────────┤
-│ 트레일러 (64 바이트)            │  §11
-└──────────────────────────────┘ 파일 끝
+offset 0
++------------------------------------------+
+| header (32 + E bytes)                    |  §3, §4
++------------------------------------------+
+| data block frame 0                       |  §5
+| data block frame 1                       |
+| ... (contiguous, no gaps)                |
++------------------------------------------+  <- index_offset
+| block table frame (never encrypted)      |  §7
+| catalog frame (may be encrypted)         |  §8
++------------------------------------------+
+| signature section (104 bytes, optional)  |  §10
++------------------------------------------+
+| trailer (64 bytes)                       |  §11
++------------------------------------------+  end of file
 ```
 
-- 데이터 블록은 헤더 바로 뒤부터 **빈틈 없이** 이어져야 합니다(MUST). 블록 `k`의 오프셋은 `헤더길이 + Σ_{i<k} (16 + stored_len_i)` 로 계산합니다.
-- "인덱스 영역"은 `index_offset`부터 서명 섹션(없으면 트레일러) 직전까지입니다. 블록 테이블 프레임은 `index_offset`에서 시작하고, 카탈로그 프레임은 블록 테이블 프레임이 끝나는 바로 그 위치에서 시작해 인덱스 영역의 끝에서 정확히 끝나야 합니다(MUST). 어긋나면 오류입니다.
-- 인덱스가 끝에 있으므로 **스트리밍 쓰기**(파이프로 출력)가 가능합니다. 읽기는 탐색(seek) 가능한 입력을 전제합니다.
+- Data blocks MUST follow the header directly, with no gaps between them. The offset of block `k` is `header_length + Σ_{i<k} (16 + stored_len_i)`.
+- The "index region" runs from `index_offset` up to the signature section, or up to the trailer if there is no signature. The block table frame starts at `index_offset`. The catalog frame MUST start exactly where the block table frame ends and MUST end exactly at the end of the index region. Anything else is an error.
+- Because the index comes last, an archive can be written as a stream (for example to a pipe). Reading assumes a seekable input.
 
-## 3. 헤더 (고정 32바이트 + 확장 E바이트)
+## 3. Header (32 fixed bytes + E extension bytes)
 
-| 오프셋 | 크기 | 이름 | 값 |
+| Offset | Size | Name | Value |
 |---|---|---|---|
 | 0 | 8 | magic | `89 45 5A 50 5A 0D 0A 1A` (`\x89EZPZ\r\n\x1a`) |
 | 8 | 1 | version_major | `1` |
 | 9 | 1 | version_minor | `0` |
-| 10 | 2 | flags | 비트 0: 암호화, 비트 1: 서명. 나머지는 0 |
-| 12 | 4 | ext_len | 헤더 확장 길이 E (≤ 65536) |
-| 16 | 16 | archive_id | 아카이브마다 새로 뽑은 무작위 16바이트 |
-| 32 | E | ext | 헤더 확장 레코드들 (§4) |
+| 10 | 2 | flags | bit 0: encrypted, bit 1: signed. Other bits 0 |
+| 12 | 4 | ext_len | header extension length E (≤ 65536) |
+| 16 | 16 | archive_id | 16 random bytes, new for each archive |
+| 32 | E | ext | header extension records (§4) |
 
-- 매직 첫 바이트가 `0x89`(ASCII 밖)이고 `\r\n`, `\x1a`가 들어 있는 건 PNG와 같은 이유예요. 텍스트 모드 전송으로 줄바꿈이 바뀌거나 7비트로 잘리면 매직부터 깨져서 바로 알 수 있어요.
-- 디코더는 version_major가 1이 아니면 거부해야 합니다(MUST). version_minor는 하위 호환 확장에만 쓰며, 모르는 minor도 읽어야 합니다(SHOULD).
-- 모르는 flags 비트가 켜져 있으면 거부해야 합니다(MUST).
-- archive_id는 암호화 논스의 일부이므로, 암호화 아카이브에서는 반드시 암호학적 난수여야 합니다(MUST).
+- The magic starts with `0x89` (outside ASCII) and contains `\r\n` and `\x1a` for the same reason PNG does: if a text-mode transfer rewrites line endings or strips the eighth bit, the magic breaks and the damage shows up at once.
+- Decoders MUST reject a version_major other than 1. version_minor is reserved for backward-compatible additions, and decoders SHOULD read files with an unknown minor version.
+- Decoders MUST reject files that have unknown flag bits set.
+- archive_id is part of the encryption nonce, so in encrypted archives it MUST come from a cryptographically secure random source.
 
-## 4. 헤더 확장 레코드
+## 4. Header extension records
 
-`ext` 영역은 다음 레코드의 연속입니다.
+The `ext` area is a sequence of records:
 
-| 크기 | 이름 |
+| Size | Name |
 |---|---|
 | 1 | type |
 | 2 | len (u16) |
 | len | value |
 
-- type의 비트 7(`0x80`)은 **필수(critical)** 표시입니다. 모르는 필수 레코드가 있으면 거부해야 하고(MUST), 모르는 일반 레코드는 건너뜁니다(MUST).
-- 같은 type의 레코드가 두 번 나오면 거부합니다(MUST).
+- Bit 7 of type (`0x80`) marks a critical record. Decoders MUST reject unknown critical records and MUST skip unknown non-critical ones.
+- Decoders MUST reject a file in which the same record type appears twice.
 
-### 4.1 `0x81` 암호화 레코드 (필수)
+### 4.1 `0x81` encryption record (critical)
 
-| 오프셋 | 크기 | 이름 | 값 |
+| Offset | Size | Name | Value |
 |---|---|---|---|
 | 0 | 1 | cipher | `1` = XChaCha20-Poly1305 |
 | 1 | 1 | kdf | `1` = Argon2id (v1.3) |
-| 2 | 16 | salt | 무작위 |
-| 18 | 4 | m_kib | 메모리(KiB) |
-| 22 | 4 | t_cost | 반복 횟수 |
-| 26 | 4 | p_lanes | 병렬도 |
+| 2 | 16 | salt | random |
+| 18 | 4 | m_kib | memory (KiB) |
+| 22 | 4 | t_cost | iterations |
+| 26 | 4 | p_lanes | parallelism |
 
-- len ≥ 30. 뒤에 붙은 추가 바이트는 무시합니다.
-- 모르는 cipher 또는 kdf 값이면 거부해야 합니다(MUST).
-- 헤더 flags의 암호화 비트와 이 레코드의 존재 여부가 일치해야 합니다(MUST).
+- len ≥ 30. Extra trailing bytes are ignored.
+- Decoders MUST reject unknown cipher or kdf values.
+- The encryption bit in the header flags MUST match the presence of this record.
 
-## 5. 프레임
+## 5. Frames
 
-데이터 블록, 블록 테이블, 카탈로그는 모두 같은 16바이트 프레임 헤더를 씁니다.
+Data blocks, the block table, and the catalog all start with the same 16-byte frame header.
 
-| 오프셋 | 크기 | 이름 | 값 |
+| Offset | Size | Name | Value |
 |---|---|---|---|
-| 0 | 4 | magic | `EZBK` 데이터 블록 / `EZBT` 블록 테이블 / `EZCT` 카탈로그 |
+| 0 | 4 | magic | `EZBK` data block / `EZBT` block table / `EZCT` catalog |
 | 4 | 1 | codec | §6 |
-| 5 | 1 | flags | 비트 0: 암호화됨. 나머지 0 |
+| 5 | 1 | flags | bit 0: encrypted. Other bits 0 |
 | 6 | 2 | reserved | 0 (MUST) |
-| 8 | 4 | raw_len | 풀었을 때 크기 |
-| 12 | 4 | stored_len | 뒤따르는 저장 바이트 수 |
-| 16 | stored_len | payload | 압축된 데이터(암호화 시 암호문 + 16바이트 태그) |
+| 8 | 4 | raw_len | size after decoding |
+| 12 | 4 | stored_len | number of stored bytes that follow |
+| 16 | stored_len | payload | compressed data (when encrypted: ciphertext followed by a 16-byte tag) |
 
-- 데이터 블록의 raw_len은 1 이상 256 MiB(268,435,456) 이하여야 합니다(MUST).
-- 블록 테이블·카탈로그의 raw_len은 1 GiB 이하여야 합니다(MUST).
-- 블록 테이블 프레임은 암호화하면 안 됩니다(MUST NOT). 데이터 블록과 카탈로그의 암호화 비트는 헤더의 암호화 비트와 같아야 합니다(MUST).
-- 인덱스 프레임(블록 테이블·카탈로그)의 codec은 0, 1, 2 중 하나여야 합니다(MUST). 레퍼런스 구현은 zstd 19를 씁니다.
+- A data block's raw_len MUST be at least 1 and at most 256 MiB (268,435,456).
+- The raw_len of the block table and of the catalog MUST NOT exceed 1 GiB.
+- The block table frame MUST NOT be encrypted. The encryption bit of data blocks and of the catalog MUST equal the encryption bit in the header.
+- Index frames (block table and catalog) MUST use codec 0, 1, or 2. The reference implementation uses zstd level 19.
 
-## 6. 코덱
+## 6. Codecs
 
-| id | 이름 | payload 형식 |
+| id | Name | Payload |
 |---|---|---|
-| 0 | store | 원본 그대로. (복호화 후) payload 길이 == raw_len |
-| 1 | zstd | RFC 8878 Zstandard 프레임 1개 이상 |
-| 2 | lzma2 | 1바이트 사전 크기 속성 + 원시 LZMA2 스트림 |
-| 3 | brain | 1바이트 테이블 크기 + 산술 부호 비트열 (§6.4) |
-| 4–255 | 예약 | 모르는 코덱은 오류 처리(MUST) |
+| 0 | store | The original bytes. Payload length (after decryption) == raw_len |
+| 1 | zstd | One or more RFC 8878 Zstandard frames |
+| 2 | lzma2 | A dictionary-size property byte followed by a raw LZMA2 stream |
+| 3 | brain | A table-size byte followed by an arithmetic-coded bit stream (§6.4) |
+| 4-255 | reserved | Unknown codecs MUST be treated as an error |
 
-인코더는 압축 결과가 원본보다 작지 않으면 store로 저장해야 합니다(SHOULD).
+Encoders SHOULD store a block with codec 0 when compression does not make it smaller.
 
 ### 6.1 store
-payload(암호화 아카이브라면 복호화한 뒤의 payload)가 곧 원본이며, 그 길이는 raw_len과 같아야 합니다(MUST). 따라서 프레임의 stored_len은 평문이면 raw_len, 암호화면 raw_len + 16입니다.
+The payload (after decryption, in an encrypted archive) is the original data, and its length MUST equal raw_len. The frame's stored_len is therefore raw_len in a plain archive and raw_len + 16 in an encrypted one.
 
 ### 6.2 zstd
-- RFC 8878 프레임을 하나 이상 이어 붙인 것입니다. 건너뛰기(skippable) 프레임도 허용합니다.
-- 윈도 크기는 2^28 바이트를 넘으면 안 됩니다(MUST). 디코더는 2^28까지 지원해야 합니다(MUST).
-- 풀어낸 전체 길이는 raw_len과 같아야 합니다(MUST).
+- One or more concatenated RFC 8878 frames. Skippable frames are allowed.
+- The window size MUST NOT exceed 2^28 bytes, and decoders MUST support windows up to 2^28 bytes.
+- The total decoded length MUST equal raw_len.
 
 ### 6.3 lzma2
-- 첫 바이트 `p` (0 ≤ p ≤ 32)는 xz 파일 포맷 규격 §5.3.1의 LZMA2 사전 크기 속성입니다. 사전 크기 = `(2 | (p & 1)) << (p / 2 + 11)` 바이트(p = 32일 때 최대 256 MiB).
-- 나머지는 xz 규격의 LZMA2 청크 열이며, 끝 표시(`0x00`)로 끝나야 합니다(MUST). 끝 표시 뒤에 남는 바이트가 있으면 오류입니다.
-- p > 32이면 거부합니다(MUST). 압축 폭탄과 메모리 고갈을 막기 위해서예요.
+- The first byte `p` (0 ≤ p ≤ 32) is the LZMA2 dictionary-size property from §5.3.1 of the xz file format specification. Dictionary size = `(2 | (p & 1)) << (p / 2 + 11)` bytes (256 MiB at p = 32).
+- The rest is a sequence of LZMA2 chunks as defined by the xz specification, and it MUST end with the end marker (`0x00`). Bytes left after the end marker are an error.
+- Decoders MUST reject p > 32. This guards against decompression bombs and memory exhaustion.
 
-### 6.4 brain (뇌 코덱): 규범적 알고리즘
+### 6.4 brain (brain codec): normative algorithm
 
-뇌 코덱은 **비트 단위 예측 + 산술 부호화** 방식입니다. 압축기와 해제기는 이 절에 적힌 계산을 **똑같이** 해야 하며(MUST), 정수 연산만 쓰므로 어떤 CPU에서도 결과가 같습니다. 숫자 하나라도 다르게 구현하면 호환되지 않습니다.
+The brain codec predicts one bit at a time and codes it with an arithmetic coder. Compressor and decompressor MUST perform exactly the computations in this section. Only integer arithmetic is used, so every CPU produces the same result, and changing a single constant breaks compatibility.
 
-#### 6.4.1 payload 구조
-- 바이트 0: `tb` = 해시 테이블 크기 지수(테이블 하나의 u16 칸 수 = 2^tb). 디코더는 16 ≤ tb ≤ 25만 받아야 합니다(MUST). 레퍼런스 인코더는 `tb = clamp(ceil(log2(raw_len)) + 1, 16, 24)`를 씁니다.
-- 바이트 1부터: 산술 부호기 출력(§6.4.10).
-- 원본의 각 바이트는 최상위 비트부터 8비트씩 차례로 부호화합니다.
-- 메모리 사용량(참고): 약 `16 × 2^tb + 2^(tb-1) + raw_len + 5 MiB` 바이트. tb=24이면 블록 64 MiB 기준 약 330 MiB.
+#### 6.4.1 Payload layout
+- Byte 0: `tb`, the hash table size exponent (each table has 2^tb u16 slots). Decoders MUST accept only 16 ≤ tb ≤ 25. The reference encoder uses `tb = clamp(ceil(log2(raw_len)) + 1, 16, 24)`.
+- From byte 1 on: the arithmetic coder output (§6.4.10).
+- Each byte of the original data is coded as 8 bits, most significant bit first.
+- Memory use (informative): about `16 × 2^tb + 2^(tb-1) + raw_len + 5 MiB` bytes, roughly 330 MiB for tb = 24 with a 64 MiB block.
 
-#### 6.4.2 기본 함수
+#### 6.4.2 Basic functions
 
-**squash**: 로지스틱 함수. 입력 d는 "확률의 로그 비"를 256배 한 값, 출력은 12비트 확률(0~4095).
+**squash** is the logistic function. Its input d is a log-odds value scaled by 256, and its output is a 12-bit probability (0 to 4095).
 
 ```
 T = [1,2,3,6,10,16,27,45,73,120,194,310,488,747,1101,1546,
@@ -181,12 +183,12 @@ T = [1,2,3,6,10,16,27,45,73,120,194,310,488,747,1101,1546,
 squash(d):
   if d >  2047: return 4095
   if d < -2047: return 1
-  w = d & 127                 # 2의 보수 비트 AND
-  i = (d >> 7) + 16           # 산술 시프트
+  w = d & 127                 # two's-complement bitwise AND
+  i = (d >> 7) + 16           # arithmetic shift
   return (T[i]*(128-w) + T[i+1]*w + 64) >> 7
 ```
 
-**stretch**: squash의 역함수 표(4096칸, i16).
+**stretch** is the inverse of squash, kept as a 4096-entry i16 table.
 
 ```
 pi = 0
@@ -198,7 +200,7 @@ for i in pi .. 4096: S[i] = 2047
 stretch(p) = S[p]
 ```
 
-**hash2**: 32비트 연산(모두 mod 2^32).
+**hash2** uses 32-bit arithmetic (everything modulo 2^32).
 
 ```
 hash2(a, b):
@@ -209,9 +211,9 @@ hash2(a, b):
   return h
 ```
 
-#### 6.4.3 적응 확률 카운터와 비트 기록
+#### 6.4.3 Adaptive probability counters and bit histories
 
-**적응 확률 카운터** (u32): "다음 비트가 1일 확률" p22(22비트)와 관측 횟수 n(10비트). 0으로 채운 메모리가 곧 초기 상태(p=½, n=0)가 되도록 이렇게 저장합니다.
+An **adaptive probability counter** (u32) holds p22, the 22-bit probability that the next bit is 1, and n, a 10-bit observation count. With the encoding below, all-zero memory is the initial state (p = ½, n = 0).
 
 ```
 cnt = ((p22 XOR 0x200000) << 10) | n
@@ -221,19 +223,19 @@ RECIP[n] = floor(131072 / (2n + 3))      # = 65536/(n+1.5), n = 0..1023
 
 update(cnt, y, limit):
   n = cnt & 1023
-  p = (cnt >> 10) XOR 0x200000           # i64로 계산
+  p = (cnt >> 10) XOR 0x200000           # computed as i64
   target = y ? (2^22 - 1) : 0
   p = p + (((target - p) * RECIP[n]) >> 16)
   if n < limit: n = n + 1
   cnt = ((p XOR 0x200000) << 10) | n
 ```
 
-limit: 차수 0 카운터 `60`, 상태 지도·매치 모델 카운터 `1023`.
+Limits: `60` for the order-0 counters, `1023` for the state maps and the match model.
 
-**비트 기록(state)** (u16, 하위 13비트 사용): 어떤 상황(컨텍스트 노드)에서 지금까지 나온 0의 개수 n0(6비트), 1의 개수 n1(6비트), 마지막 비트(1비트). 한쪽이 늘 때 반대쪽이 크면 깎아서, 오래된 기억보다 최근 기억을 중시합니다.
+A **bit history (state)** (u16, low 13 bits used) records, for one situation (a context node), the number of 0s seen so far, n0 (6 bits), the number of 1s, n1 (6 bits), and the last bit (1 bit). When one count grows while the other is large, the other is cut down, so recent behavior counts for more than old behavior.
 
 ```
-state = n0 | (n1 << 6) | (last << 12)          # 처음엔 0 (아무 기록 없음)
+state = n0 | (n1 << 6) | (last << 12)          # starts at 0 (no history)
 next_state(s, y):
   n0 = s & 63 ; n1 = (s >> 6) & 63
   if y == 1: n1 = min(n1 + 1, 63) ; if n0 > 2: n0 = (n0 >> 1) + 1
@@ -242,72 +244,72 @@ next_state(s, y):
 total(s) = (s & 63) + ((s >> 6) & 63)
 ```
 
-**상태 지도(state map)**: 모델마다 카운터 8192개. "이런 기록을 가진 상황에서는 다음 비트가 1일 확률이 얼마였나"를 모든 상황에 걸쳐 배웁니다. 처음 보는 상황(state 0)도 그동안의 경험에서 나온 확률로 출발할 수 있어요.
+A **state map** holds 8192 counters per model. Across all situations, it learns how often a 1 followed each history. A situation seen for the first time (state 0) therefore starts from a probability learned from earlier experience.
 
-#### 6.4.4 상태 변수
+#### 6.4.4 State variables
 
-| 이름 | 초기값 | 뜻 |
+| Name | Initial value | Meaning |
 |---|---|---|
-| c0 | 1 | 지금 바이트에서 이미 본 비트들 앞에 1을 붙인 값 (1..255) |
-| nib | 1 | 지금 니블(4비트)에서 본 비트들 앞에 1을 붙인 값 (1..15) |
-| bitpos | 0 | 지금 바이트에서 몇 번째 비트인지 (0..7) |
-| c4 | 0 | 최근 4바이트 (최근 것이 하위 바이트) |
-| c8 | 0 | 그 앞의 4바이트 |
-| word, pword | 0 | 지금 단어 / 직전 단어의 해시 |
-| hist | 빈 배열 | 지금까지 나온 바이트 전부 |
-| m_ptr, m_len, lq | 0 | 매치 모델 상태 (§6.4.6) |
+| c0 | 1 | bits of the current byte seen so far, with a leading 1 (1..255) |
+| nib | 1 | bits of the current nibble (4 bits) seen so far, with a leading 1 (1..15) |
+| bitpos | 0 | position of the current bit within the byte (0..7) |
+| c4 | 0 | the last 4 bytes (most recent in the low byte) |
+| c8 | 0 | the 4 bytes before those |
+| word, pword | 0 | hash of the current word / of the previous word |
+| hist | empty | every byte so far |
+| m_ptr, m_len, lq | 0 | match model state (§6.4.6) |
 
-`c1 = c4 & 0xFF` (직전 바이트). 학습 단계(§6.4.8 6번)에서 c0는 잠시 256..511이 되었다가 바이트 경계 처리에서 1로 돌아갑니다.
+`c1 = c4 & 0xFF` (the previous byte). During learning (§6.4.8 step 6) c0 briefly becomes 256..511 and returns to 1 at the byte boundary.
 
-#### 6.4.5 컨텍스트 모델 9개 + 차수 0
+#### 6.4.5 Nine context models and order 0
 
-바이트 경계마다 아래 9개의 컨텍스트 값을 계산합니다.
+At every byte boundary, compute these nine context values:
 
-| i | 이름 | ctx_i |
+| i | Name | ctx_i |
 |---|---|---|
-| 0 | 차수 1 | `c1` |
-| 1 | 차수 2 | `c4 & 0xFFFF` |
-| 2 | 차수 3 | `c4 & 0xFFFFFF` |
-| 3 | 차수 4 | `c4` |
-| 4 | 차수 6 | `hash2(c4, c8 & 0xFFFF)` |
-| 5 | 단어 | `word == 0 ? hash2(c1, 0x5757) : word` |
-| 6 | 두 단어 | `hash2(word, pword + 0x3131)` |
-| 7 | 건너뛰기 1 | `c4 & 0x00FFFF00` |
-| 8 | 건너뛰기 2 | `c4 & 0xFF0000FF` |
+| 0 | order 1 | `c1` |
+| 1 | order 2 | `c4 & 0xFFFF` |
+| 2 | order 3 | `c4 & 0xFFFFFF` |
+| 3 | order 4 | `c4` |
+| 4 | order 6 | `hash2(c4, c8 & 0xFFFF)` |
+| 5 | word | `word == 0 ? hash2(c1, 0x5757) : word` |
+| 6 | word pair | `hash2(word, pword + 0x3131)` |
+| 7 | sparse 1 | `c4 & 0x00FFFF00` |
+| 8 | sparse 2 | `c4 & 0xFF0000FF` |
 
-**해시 테이블**: 모델마다 하나씩, 64바이트 줄(line)의 배열입니다. 한 줄은 u16 32칸 = 2개의 길(way) × 16칸이고, 각 길의 칸 0은 확인값, 칸 1~15는 니블 이진 트리 15개 노드의 비트 기록입니다. 모델 0은 `bits = min(tb, 18)`, 나머지는 `bits = tb` (u16 칸 수 = 2^bits). 줄 수 `2^(bits-5)`, `shift = 32 - (bits - 5)`. 처음엔 전부 0입니다.
+**Hash tables**: one per model, each an array of 64-byte lines. A line has 32 u16 slots, split into 2 ways of 16 slots. Slot 0 of a way is a check value, and slots 1 to 15 hold the bit histories of the 15 nodes of a nibble's binary tree. Model 0 uses `bits = min(tb, 18)` and the others use `bits = tb` (2^bits u16 slots). There are `2^(bits-5)` lines, and `shift = 32 - (bits - 5)`. Tables start out zeroed.
 
 ```
-find(table, h):                               # 반환값: (줄, 길 시작칸 0 또는 16)
+find(table, h):                               # returns (line, way start slot: 0 or 16)
   L   = h >> shift
-  chk = ((h * 0x2545F491) >> 16) | 1          # mod 2^32 곱셈 후 상위 16비트
+  chk = ((h * 0x2545F491) >> 16) | 1          # multiply mod 2^32, keep the upper 16 bits
   if line[L][0]  == chk: return (L, 0)
   if line[L][16] == chk: return (L, 16)
-  w = (total(line[L][1]) < total(line[L][17])) ? 0 : 16   # 덜 쓴 길을 교체(같으면 16)
+  w = (total(line[L][1]) < total(line[L][17])) ? 0 : 16   # replace the less used way (16 on a tie)
   line[L][w .. w+16] = 0 ; line[L][w] = chk
   return (L, w)
 ```
 
-**버킷 고르기**: 바이트 시작(c0 = 1)과 4비트를 본 직후(c0 = 16..31)에, 모든 i에 대해
-`base_i = find(table_i, hash2(ctx_i + (i << 28), c0))` (덧셈은 mod 2^32). 4비트 뒤의 선택에도 바이트 경계에서 계산한 같은 ctx_i를 씁니다. 모델 i의 현재 노드 `node_i`는 `base_i`가 가리키는 길의 시작칸 + nib 위치의 u16 칸입니다.
+**Selecting buckets**: at the start of each byte (c0 = 1) and right after its first 4 bits (c0 = 16..31), for every i,
+`base_i = find(table_i, hash2(ctx_i + (i << 28), c0))` (the addition wraps modulo 2^32). The selection after 4 bits uses the same ctx_i values computed at the byte boundary. The current node of model i, `node_i`, is the u16 slot at the way start of `base_i` plus nib.
 
-**차수 0**: 256칸짜리 카운터 배열 `t0`, `t0[c0]`을 씁니다.
+**Order 0**: a 256-entry counter array `t0`, indexed as `t0[c0]`.
 
-#### 6.4.6 매치 모델
+#### 6.4.6 Match model
 
-긴 반복(같은 문장, 같은 코드 덩어리)을 잡아냅니다.
+The match model finds long repeats, such as the same sentence or the same block of code appearing again.
 
-- 해시 표 `mt`: u32 `2^(tb-3)`칸, 처음엔 0. `mshift = 32 - (tb - 3)`.
-- 상태: `m_ptr`(예측에 쓸 hist 위치), `m_len`(현재 일치 길이, 처음 0), 카운터 `m_sm[64]`.
+- Hash table `mt`: `2^(tb-3)` u32 entries, initially 0. `mshift = 32 - (tb - 3)`.
+- State: `m_ptr` (the position in hist used for the prediction), `m_len` (current match length, initially 0), and counters `m_sm[64]`.
 - `MATCH_MIN = 6`, `MATCH_KEEP = 16`.
 
-바이트 경계마다(새 바이트를 hist에 넣은 뒤, `pos = len(hist)`):
+At every byte boundary (after the new byte has been appended to hist, with `pos = len(hist)`):
 
 ```
 last = hist[pos-1]
 if m_len > 0:
   if hist[m_ptr] == last:   m_len = min(m_len + 1, 65535)
-  elif m_len >= MATCH_KEEP: m_len = 1          # 긴 일치가 한 바이트 어긋남: 낮은 확신으로 계속 따라감
+  elif m_len >= MATCH_KEEP: m_len = 1          # a long match missed by one byte: keep following it with low confidence
   else:                     m_len = 0
   if m_len > 0: m_ptr += 1
 if pos >= 6:
@@ -322,188 +324,188 @@ if pos >= 6:
 lq = (m_len < 16) ? m_len : min(16 + ((m_len - 16) >> 2), 31)
 ```
 
-#### 6.4.7 예측 (비트마다)
+#### 6.4.7 Prediction (every bit)
 
-입력 벡터 x[12]를 만듭니다.
+Build the input vector x[12]:
 
 ```
-s_i   = node_i & 0x1FFF                         # 모델 i의 현재 노드 비트 기록
-x[i]  = stretch(p12(SM_i[s_i]))                 i = 0..8  (SM_i = 모델 i의 상태 지도)
+s_i   = node_i & 0x1FFF                         # bit history of model i's current node
+x[i]  = stretch(p12(SM_i[s_i]))                 i = 0..8  (SM_i = state map of model i)
 x[9]  = stretch(p12(t0[c0]))
-x[10] = 0 ; mctx = 없음
+x[10] = 0 ; mctx = none
 if m_len > 0:
   pb = hist[m_ptr] | 0x100 ; sh = 8 - bitpos
-  if (pb >> sh) == c0:                 # 지금까지의 비트가 예측 바이트와 일치
-    e = (pb >> (sh - 1)) & 1           # 예측 비트
+  if (pb >> sh) == c0:                 # the bits so far agree with the predicted byte
+    e = (pb >> (sh - 1)) & 1           # predicted bit
     mctx = lq*2 + e
     x[10] = stretch(p12(m_sm[mctx]))
-x[11] = 256                            # 바이어스
+x[11] = 256                            # bias
 ```
 
-**신경망(믹서) 3개**: 각각 256개 가중치 세트, 세트마다 i32 가중치 12개, 초기값 전부 `16384`.
+**Three neural mixers**: each has 256 weight sets of 12 i32 weights, all initialized to `16384`.
 
 ```
 mix(M, sel):
-  dot = Σ_{i=0..11} x[i] * M.w[sel][i]          # i64로 곱하고 더함
+  dot = Σ_{i=0..11} x[i] * M.w[sel][i]          # multiply and sum in i64
   st  = clamp(dot >> 16, -2047, 2047)
   M.pr = squash(st) ; M.sel = sel
   return st
 
-selA = c0                                       # 지금 바이트의 어느 비트인지
-selB = (mctx 없음 ? 0 : lq) * 8 + bitpos        # 매치가 얼마나 길게 이어지는지
-selC = c1                                       # 직전 바이트가 무엇인지
-st   = ((mix(A,selA) + mix(B,selB) + mix(C,selC)) * 21846) >> 16    # 세 의견의 평균
+selA = c0                                       # which bit of the byte this is
+selB = (mctx is none ? 0 : lq) * 8 + bitpos     # how long the match has been running
+selC = c1                                       # what the previous byte was
+st   = ((mix(A,selA) + mix(B,selB) + mix(C,selC)) * 21846) >> 16    # average of the three
 pm   = squash(st)
 ```
 
-세 값의 평균인 st는 -2048 ..= 2047 범위입니다(-2048이 나올 수 있음). squash는 이 값을 그대로 받으며, APM의 `s = st + 2048`은 0..4095가 됩니다. 표로 squash를 구현한다면 -2048도 포함해야 합니다.
+The average st lies in -2048 ..= 2047 (-2048 can occur). squash accepts it as is, and the APM's `s = st + 2048` then falls in 0..4095. A table-based squash must cover -2048 as well.
 
-**APM 2단 보정** (예측을 한 번 더 다듬는 표):
+**Two APM stages** (tables that refine the prediction once more):
 
 ```
-APM(n): u16 표 n×33칸, t[i*33+j] = squash((j-16)*128) * 16
+APM(n): u16 table with n×33 entries, t[i*33+j] = squash((j-16)*128) * 16
 pp(A, st, cx):
   s = st + 2048 ; lo = s >> 7 ; w = s & 127
-  A.idx = cx*33 + lo + (w >> 6)                 # 업데이트할 가까운 칸
+  A.idx = cx*33 + lo + (w >> 6)                 # the nearer entry, updated later
   return (t[cx*33+lo]*(128-w) + t[cx*33+lo+1]*w) >> 11
 
 a1 = pp(APM1(256),   st, c0)
 a2 = pp(APM2(65536), st, c0 | (c1 << 8))
-p  = clamp((pm + a1 + 2*a2 + 2) >> 2, 1, 4095)  # 다음 비트가 1일 확률 (/4096)
+p  = clamp((pm + a1 + 2*a2 + 2) >> 2, 1, 4095)  # probability that the next bit is 1 (/4096)
 ```
 
-#### 6.4.8 학습 (비트 y를 부호화/복호화한 뒤)
+#### 6.4.8 Learning (after coding or decoding bit y)
 
-순서대로:
+In this order:
 
 ```
-1. 모든 i: update(SM_i[s_i], y, 1023) ; 테이블의 node_i 칸에 next_state(node_i, y)를 다시 씀
+1. For every i: update(SM_i[s_i], y, 1023) ; write next_state(node_i, y) back into the table slot of node_i
 2. update(t0[c0], y, 60)
-3. mctx가 있으면: update(m_sm[mctx], y, 1023)
-4. 믹서 A, B, C 각각:
+3. If mctx is set: update(m_sm[mctx], y, 1023)
+4. For each of the mixers A, B, C:
      err = ((y << 12) - M.pr) * 16
      M.w[M.sel][i] = wrap32(M.w[M.sel][i] + ((x[i] * err) >> 16))   i = 0..11
-5. APM1, APM2 각각 (i32로 계산. g는 u16 범위를 넘을 수 있음):
+5. For APM1 and APM2 (compute in i32, since g can exceed the u16 range):
      g = (y << 16) + (y << 7) - y - y
-     t[idx] = t[idx] + ((g - t[idx]) >> 7)       # 결과는 항상 0..65535
+     t[idx] = t[idx] + ((g - t[idx]) >> 7)       # the result always stays in 0..65535
 6. c0 = c0*2 + y ; nib = nib*2 + y ; bitpos += 1
-7. bitpos == 8 이면 바이트 경계 처리(§6.4.9)
-   bitpos == 4 이면 nib = 1 후 버킷 고르기(§6.4.5)
+7. If bitpos == 8: byte boundary processing (§6.4.9)
+   If bitpos == 4: nib = 1, then select buckets (§6.4.5)
 ```
 
-#### 6.4.9 바이트 경계 처리
+#### 6.4.9 Byte boundary processing
 
 ```
 c = c0 & 0xFF
 hist.push(c)
 c8 = (c8 << 8) | (c4 >> 24)
 c4 = (c4 << 8) | c
-lc = ASCII 소문자화(c)                     # 'A'..'Z'만 바뀜
-if 'a' <= lc <= 'z' or c >= 0x80:          # 0x80 이상: UTF-8 글자(한글 등)
+lc = ASCII lowercase of c                  # only 'A'..'Z' change
+if 'a' <= lc <= 'z' or c >= 0x80:          # 0x80 and above: UTF-8 letters (Hangul, kana, ...)
   word = hash2(word + lc, 0x77770001)
 elif word != 0:
   pword = word ; word = 0
-매치 모델 갱신(§6.4.6)
+update the match model (§6.4.6)
 c0 = 1 ; nib = 1 ; bitpos = 0
-9개 ctx 다시 계산 → 버킷 고르기(§6.4.5)
+recompute the 9 ctx values, then select buckets (§6.4.5)
 ```
 
-시작할 때(아무 바이트도 없을 때)도 ctx 계산과 버킷 고르기를 한 번 합니다.
+At the very start, before any byte, the ctx values are also computed and the buckets selected once.
 
-#### 6.4.10 산술 부호기 (32비트)
+#### 6.4.10 Arithmetic coder (32-bit)
 
 ```
 x1 = 0, x2 = 0xFFFFFFFF                      # u32
-xmid(p) = x1 + ((x2 - x1) >> 12) * p + ((((x2 - x1) & 0xFFF) * p) >> 12)     # u32, 넘침 없음
+xmid(p) = x1 + ((x2 - x1) >> 12) * p + ((((x2 - x1) & 0xFFF) * p) >> 12)     # u32, cannot overflow
 
-부호화(y, p):
+encode(y, p):
   m = xmid(p)
   if y: x2 = m  else: x1 = m + 1
   while ((x1 XOR x2) & 0xFF000000) == 0:
-    출력(x2 >> 24) ; x1 = x1 << 8 ; x2 = (x2 << 8) | 255
-끝: x1을 빅 엔디언 4바이트로 출력
+    output(x2 >> 24) ; x1 = x1 << 8 ; x2 = (x2 << 8) | 255
+at the end: output x1 as 4 big-endian bytes
 
-복호화: x = 처음 4바이트(빅 엔디언). 입력이 끝나면 0을 읽은 것으로 침
+decode: x = the first 4 bytes (big-endian); reading past the end of the input yields 0
   m = xmid(p) ; y = (x <= m) ? 1 : 0
-  y면 x2 = m, 아니면 x1 = m + 1
+  if y: x2 = m, otherwise: x1 = m + 1
   while ((x1 XOR x2) & 0xFF000000) == 0:
-    x1 = x1 << 8 ; x2 = (x2 << 8) | 255 ; x = (x << 8) | 다음바이트
+    x1 = x1 << 8 ; x2 = (x2 << 8) | 255 ; x = (x << 8) | next_byte
 ```
 
-정확히 raw_len 바이트를 복원하면 멈춥니다. 남은 입력은 무시합니다(블록 해시가 무결성을 보장).
+Decoding stops after exactly raw_len bytes. Any remaining input is ignored (the block hash guarantees integrity).
 
-## 7. 블록 테이블 (`EZBT`, 항상 평문)
+## 7. Block table (`EZBT`, always plaintext)
 
-프레임 payload를 풀면 다음과 같습니다. 열(column) 단위로 모아 써서 압축이 잘 되게 했어요.
+The decoded frame payload is laid out as follows. Values are grouped by column so that they compress well.
 
 ```
 varint  version = 1
-varint  n                       # 데이터 블록 수
+varint  n                       # number of data blocks
 varint  raw_len[n]              # 1 ..= 268435456
 varint  stored_len[n]
-bytes32 hash[n]                 # BLAKE3( 블록의 16바이트 프레임 헤더 ‖ payload )
+bytes32 hash[n]                 # BLAKE3( the block's 16-byte frame header ‖ payload )
 ```
 
-- 블록 오프셋은 §2의 공식으로 계산하며, 마지막 블록의 끝은 index_offset과 정확히 같아야 합니다(MUST).
-- 해석 후 남는 바이트가 있으면 오류입니다(MUST).
-- 각 데이터 블록 프레임 헤더의 raw_len·stored_len은 블록 테이블의 값과 같아야 합니다(MUST).
-- 블록 테이블은 암호화하지 않으므로, **비밀번호 없이도** 모든 블록의 무결성을 검사할 수 있습니다. 노출되는 건 블록 크기뿐이며, 이는 어차피 파일 길이로 드러나는 정보입니다.
+- Block offsets follow from the formula in §2, and the end of the last block MUST equal index_offset exactly.
+- Bytes left over after parsing are an error (MUST).
+- The raw_len and stored_len in each data block's frame header MUST equal the values in the block table.
+- Because the block table is never encrypted, the integrity of every block can be checked without the password. This reveals only the block sizes, which the file length exposes anyway.
 
-## 8. 카탈로그 (`EZCT`, 암호화 가능)
+## 8. Catalog (`EZCT`, may be encrypted)
 
 ```
 varint   version = 1
-u8       hash_len               # 파일 해시 길이: 0, 16, 32
-svarint  created                # 생성 시각 (유닉스 초)
-varint   creator_len ; bytes creator   # 만든 프로그램 (UTF-8)
+u8       hash_len               # file hash length: 0, 16, 32
+svarint  created                # creation time (Unix seconds)
+varint   creator_len ; bytes creator   # creating program (UTF-8)
 
-# 조각(chunk) 배치: 조각 id는 이 순서로 0부터 매김
-varint   block_count            # 블록 테이블의 n과 같아야 함
+# chunk layout: chunk ids are numbered from 0 in this order
+varint   block_count            # must equal n in the block table
 varint   chunk_count[block_count]
-varint   chunk_len[Σ chunk_count]       # 블록별로 차례대로, 각 ≥ 1
-#   블록 b의 chunk_len 합 == raw_len[b]  (MUST)
+varint   chunk_len[Σ chunk_count]       # block by block, each ≥ 1
+#   sum of chunk_len for block b == raw_len[b]  (MUST)
 
-# 항목(entry): 경로 오름차순(바이트 비교), 중복 없음
+# entries: sorted by path (bytewise), no duplicates
 varint   entry_count = m
-m번:  varint shared ; varint suffix_len ; bytes suffix   # 앞 항목과 겹치는 앞부분 생략
-u8       type[m]                # 0 파일, 1 폴더, 2 심볼릭 링크
-varint   mode[m]                # 유닉스 권한 비트 (& 0o7777)
-svarint  mtime_delta[m]         # 수정 시각(초), 앞 항목과의 차이 (첫 항목은 0 기준)
+m times: varint shared ; varint suffix_len ; bytes suffix   # the prefix shared with the previous path is omitted
+u8       type[m]                # 0 file, 1 directory, 2 symbolic link
+varint   mode[m]                # Unix permission bits (& 0o7777)
+svarint  mtime_delta[m]         # modification time (seconds), difference from the previous entry (first entry: from 0)
 varint   mtime_nsec[m]          # 0 ..= 999999999
 
-# 파일 항목만, 항목 순서대로 (f = 파일 수)
+# file entries only, in entry order (f = number of files)
 u8       transform[f]           # §9
 varint   nchunks[f]
-svarint  chunk_ref_delta[Σ nchunks]   # ref - (직전 ref + 1). "직전 ref"는 파일이 바뀌어도
-                                      # 이어지며(파일마다 초기화하지 않음), 맨 처음 값만 -1
-bytes    file_hash[f × hash_len]      # BLAKE3(원본 파일 내용)의 앞 hash_len 바이트
+svarint  chunk_ref_delta[Σ nchunks]   # ref - (previous ref + 1). "previous ref" carries over
+                                      # across files (it is not reset per file); only the very first is -1
+bytes    file_hash[f × hash_len]      # first hash_len bytes of BLAKE3(original file content)
 
-# 심볼릭 링크 항목만, 항목 순서대로
+# symbolic link entries only, in entry order
 varint   target_len ; bytes target    # UTF-8
 ```
 
-- 파일 내용 = 조각 목록의 조각들을 순서대로 이어 붙인 뒤 transform을 되돌린 것.
-- 파일 크기는 따로 저장하지 않습니다. 조각 길이의 합이 곧 크기입니다(변환은 길이를 바꾸지 않음).
-- 같은 조각을 여러 파일이 가리킬 수 있습니다. 이게 중복 제거예요. 어떤 파일도 가리키지 않는 조각이 있어도 됩니다.
-- hash_len이 0, 16, 32가 아니면 오류입니다(MUST).
-- 경로는 아카이브 루트 기준 상대 경로입니다. 상위 폴더 항목은 넣는 것을 권장하지만(SHOULD) 필수는 아니며, 추출기는 없는 상위 폴더를 만들어야 합니다(MUST).
-- 파일·심볼릭 링크 항목의 "아래"에 다른 항목이 있으면 안 됩니다(MUST). 예: 링크 `a` → `/etc` 와 파일 `a/x`가 함께 있으면 거부.
-- mode: 디코더는 0o7777 밖의 비트를 무시(마스크)합니다. 심볼릭 링크의 mode는 참고용입니다. 추출기는 setuid·setgid·sticky 비트를 사용자가 명시적으로 원하지 않는 한 복원하지 않아야 합니다(SHOULD). 폴더의 권한과 시각은 모든 항목(파일과 심볼릭 링크 포함)을 다 만든 뒤에 적용해야 합니다(SHOULD). 심볼릭 링크를 만들어도 폴더 시각이 바뀌기 때문이에요.
-- mode의 0o7777 밖 비트는 예약 영역으로, "모르는 것은 거부" 원칙(§17)의 예외로서 무시합니다.
-- mtime은 그 항목 자신의 시각입니다(심볼릭 링크는 링크 자체의 시각).
-- 경로 규칙(MUST):
-  - UTF-8, 길이 1~4096 바이트, 구분자는 `/`
-  - `/`로 시작하거나 끝나면 안 됨, 빈 구성요소·`.`·`..` 금지
-  - NUL(`\0`), 역슬래시(`\`) 금지, 첫 구성요소에 콜론(`:`) 금지(`C:`, `C:foo` 같은 드라이브 표기 차단)
-- 디코더는 정렬 위반, 중복 경로, 범위를 벗어난 조각 참조, 남는 바이트를 오류로 처리해야 합니다(MUST).
+- File content is the file's chunks joined in order, with the transform undone.
+- File sizes are not stored separately. The sum of the chunk lengths is the size, since transforms do not change length.
+- Several files can point to the same chunk; that is how deduplication works. Chunks that no file references are allowed.
+- A hash_len other than 0, 16, or 32 is an error (MUST).
+- Paths are relative to the archive root. Entries for parent directories SHOULD be present but are optional, and extractors MUST create missing parent directories.
+- No entry may lie "inside" a file or symbolic link entry (MUST). For example, a link `a` → `/etc` together with a file `a/x` must be rejected.
+- mode: decoders ignore (mask off) bits outside 0o7777. A symbolic link's mode is informational. Extractors SHOULD NOT restore setuid, setgid, or sticky bits unless the user explicitly asks for it. Directory permissions and times SHOULD be applied after every entry, files and symbolic links included, has been created, because creating a symbolic link also changes its directory's time.
+- Bits of mode outside 0o7777 are reserved and ignored, as an exception to the rule of rejecting what a decoder does not know (§17).
+- mtime is the entry's own time (for a symbolic link, the time of the link itself).
+- Path rules (MUST):
+  - UTF-8, 1 to 4096 bytes, with `/` as the separator
+  - no leading or trailing `/`, and no empty, `.`, or `..` components
+  - no NUL (`\0`) or backslash (`\`), and no colon (`:`) in the first component, which blocks drive forms such as `C:` and `C:foo`
+- Decoders MUST treat sort-order violations, duplicate paths, out-of-range chunk references, and leftover bytes as errors.
 
-## 9. 파일 변환 (실행 파일 전처리)
+## 9. File transforms (executable preprocessing)
 
-기계어의 "상대 주소 점프"를 "절대 주소"로 바꿔요. 같은 함수를 부르는 명령들이 똑같은 바이트가 되어 압축이 잘 됩니다. 길이를 바꾸지 않고, 위치 `i`는 **파일 시작 기준**입니다.
+These transforms turn relative jump targets in machine code into absolute addresses. Calls to the same function then become identical byte sequences, which compress better. Lengths do not change, and the position `i` is counted from the start of the file.
 
-| id | 이름 |
+| id | Name |
 |---|---|
-| 0 | 없음 |
+| 0 | none |
 | 1 | x86 (E8/E9) |
 | 2 | ARM64 (BL) |
 
@@ -513,9 +515,9 @@ x86(buf, encode):
   while i + 5 <= len(buf):
     if buf[i] == 0xE8 or buf[i] == 0xE9:
       v = u32le(buf[i+1..i+5])
-      if (v >> 23) == 0 or (v >> 23) == 0x1FF:          # |변위| < 2^23 인 것만
+      if (v >> 23) == 0 or (v >> 23) == 0x1FF:          # only when |displacement| < 2^23
         r = (encode ? v + i : v - i) & 0x00FFFFFF          # mod 2^32
-        if r & 0x00800000: r |= 0xFF000000                 # 24비트 부호 확장
+        if r & 0x00800000: r |= 0xFF000000                 # sign-extend from 24 bits
         buf[i+1..i+5] = u32le(r)
       i += 5
     else:
@@ -530,11 +532,11 @@ arm64(buf, encode):
       buf[i..i+4] = u32le(0x94000000 | imm)
 ```
 
-두 변환 모두 정확히 되돌릴 수 있습니다(x86은 변환 결과도 같은 범위 안에 있어서 해제기가 구별 가능).
+Both transforms are exactly reversible. For x86, a transformed value stays within the same range, so the decoder can tell which values were changed.
 
-## 10. 서명 섹션 (104바이트, 선택)
+## 10. Signature section (104 bytes, optional)
 
-| 오프셋 | 크기 | 이름 | 값 |
+| Offset | Size | Name | Value |
 |---|---|---|---|
 | 0 | 4 | magic | `EZSG` |
 | 4 | 1 | algo | `1` = Ed25519 |
@@ -542,97 +544,97 @@ arm64(buf, encode):
 | 8 | 32 | public_key | |
 | 40 | 64 | signature | |
 
-- 서명 대상 메시지 = `"EZPZ-v1 signature\0"`(18바이트) ‖ `root_hash` (§12)
-- 디코더는 RFC 8032 Ed25519 검증에 다음 제한을 더한 "strict" 검증을 해야 합니다(MUST): S < L(정규형), 공개키 A와 R이 정규 인코딩이고 작은 위수(small-order) 점이 아닐 것, 코팩터 없는 검증식 `[S]B = R + [k]A`. 서명이 있는데 틀리면 아카이브를 거부해야 합니다(MUST).
-- 서명을 기대하는 검증자(예: 특정 공개키를 지정한 경우)는 **서명이 없는 아카이브도 거부**해야 합니다(MUST). 그렇지 않으면 서명을 떼어 내고 지문을 다시 계산한 가짜를 막을 수 없어요.
-- 서명이 증명하는 것은 "이 공개키의 주인이 이 root_hash(= 이 아카이브의 내용 전체)에 서명했다"는 것뿐입니다. 누가 처음 만들었는지는 증명하지 않으며(누구든 기존 아카이브에 자기 서명을 다시 붙일 수 있고, 암호화 아카이브도 비밀번호 없이 다시 서명할 수 있음), 그 키를 믿을지는 사용자가 정합니다.
-- 검증자가 기대하는 공개키를 지정했다면, 서명 섹션의 public_key가 그 키와 정확히 같아야 합니다(MUST). 서명 섹션 자체는 다른 해시로 보호되지 않으므로, 이 비교 없이는 다른 키로 바꿔 서명한 파일도 "유효"하게 보입니다.
+- Signed message = `"EZPZ-v1 signature\0"` (18 bytes) ‖ `root_hash` (§12).
+- Decoders MUST perform "strict" Ed25519 verification, meaning RFC 8032 verification with these restrictions: S < L (canonical), the public key A and R canonically encoded and not small-order points, and the cofactorless equation `[S]B = R + [k]A`. If a signature is present and does not verify, decoders MUST reject the archive.
+- A verifier that expects a signature (for example because a specific public key was given) MUST also reject archives that have no signature. Otherwise someone could strip the signature, recompute the hashes, and pass the result off as genuine.
+- A signature proves only that the holder of this public key signed this root_hash, which covers the entire content of the archive. It does not prove who created the archive: anyone can add their own signature to an existing archive, and an encrypted archive can be re-signed without the password. Whether to trust the key is up to the user.
+- When the verifier specifies an expected public key, the public_key in the signature section MUST equal it exactly. No other hash protects the signature section, so without this comparison a file re-signed with a different key also looks "valid".
 
-## 11. 트레일러 (마지막 64바이트)
+## 11. Trailer (last 64 bytes)
 
-| 오프셋 | 크기 | 이름 | 값 |
+| Offset | Size | Name | Value |
 |---|---|---|---|
-| 0 | 8 | index_offset | 블록 테이블 프레임 시작 위치 |
-| 8 | 8 | archive_len | 파일 전체 길이 |
-| 16 | 32 | root_hash | BLAKE3(헤더 전체 ‖ 인덱스 영역 전체), §12 참고 |
-| 48 | 4 | flags | 비트 0: 서명 섹션 있음 |
-| 52 | 4 | check | BLAKE3(트레일러 0..52)의 앞 4바이트 |
+| 0 | 8 | index_offset | start of the block table frame |
+| 8 | 8 | archive_len | total file length |
+| 16 | 32 | root_hash | BLAKE3(entire header ‖ entire index region), see §12 |
+| 48 | 4 | flags | bit 0: signature section present |
+| 52 | 4 | check | first 4 bytes of BLAKE3(trailer bytes 0..52) |
 | 56 | 8 | end_magic | `EZPZEND\x1a` |
 
-- archive_len이 실제 파일 길이와 다르면 오류입니다(MUST). 잘린 파일이나 뒤에 붙은 쓰레기를 잡아냅니다.
-- 트레일러 flags의 서명 비트와 헤더 flags의 서명 비트가 같아야 합니다(MUST). 모르는 트레일러 flags 비트가 켜져 있으면 거부합니다(MUST).
-- `헤더길이 ≤ index_offset` 이고 `index_offset + 32 ≤ 인덱스 영역의 끝`이어야 합니다(MUST).
+- An archive_len that differs from the actual file length is an error (MUST). This catches truncated files and trailing garbage.
+- The signature bit in the trailer flags MUST equal the signature bit in the header flags. Decoders MUST reject unknown trailer flag bits.
+- `header_length ≤ index_offset` and `index_offset + 32 ≤ end of the index region` MUST hold.
 
-## 12. 무결성 사슬과 아카이브 지문
-
-```
-root_hash = BLAKE3( 헤더 전체 바이트(32+E) ‖ 인덱스 영역 전체 바이트 )
-
-서명 ──▶ root_hash ─┬─ 헤더 (플래그, archive_id, 암호화 매개변수)
-  (선택)   (트레일러)  └─ 인덱스 영역
-                          ├─ 블록 테이블: hash[k] ──▶ 데이터 블록 k (프레임 헤더 + 저장 바이트)
-                          └─ 카탈로그: file_hash ──▶ 복원된 원본 파일 내용
-```
-
-- 트레일러 자체는 check 필드와 구조 검사(archive_len, index_offset, flags 일치)로, 서명 섹션은 서명 검증으로 보호됩니다. 그래서 **실수로 생긴 손상**(전송 오류, 디스크 손상, 잘림)은 어느 바이트든 이 사슬 어딘가에서 반드시 걸립니다.
-- **일부러 고친 것**은 다릅니다. 해시에는 비밀키가 없어서, 공격자는 내용을 고친 뒤 모든 해시를 다시 계산할 수 있어요. 의도적 변조를 막으려면 (a) 신뢰하는 공개키의 서명을 요구하거나(§10), (b) 믿을 수 있는 곳에 따로 보관해 둔 root_hash와 비교해야 합니다. 암호화 아카이브는 비밀번호를 아는 사람만 내용을 고칠 수 있지만(AEAD), 비밀번호를 아는 사람끼리의 변조는 역시 서명으로 구별해야 합니다.
-- `root_hash`는 아카이브의 "지문(digest)"이기도 합니다. 이 32바이트만 따로 기록해 두면(예: 공개 게시판, 블록체인) 나중에 같은 아카이브인지 확인할 수 있어요.
-- 디코더는 인덱스를 해석하기 전에 root_hash를 확인해야 하고(MUST), 블록을 쓰기 전에 블록 해시를(MUST), 파일을 다 풀면 hash_len > 0일 때 파일 해시를(MUST) 확인해야 합니다.
-
-## 13. 암호화
+## 12. Integrity chain and archive fingerprint
 
 ```
-password = 사용자 비밀번호를 유니코드 NFC로 정규화한 UTF-8 바이트
-master = Argon2id(password, salt, m_kib, t_cost, p_lanes, 출력 32바이트, secret·associated data 없음, 버전 0x13)
+root_hash = BLAKE3( entire header (32+E bytes) ‖ entire index region )
+
+signature ──▶ root_hash ─┬─ header (flags, archive_id, encryption parameters)
+ (optional)   (trailer)   └─ index region
+                              ├─ block table: hash[k] ──▶ data block k (frame header + stored bytes)
+                              └─ catalog: file_hash ──▶ restored original file content
+```
+
+- The trailer is protected by its check field and by structural checks (archive_len, index_offset, matching flags), and the signature section by signature verification. Accidental damage to any byte (transfer errors, disk errors, truncation) is therefore caught somewhere along this chain.
+- The hashes use no secret key, so they do not stop deliberate changes: an attacker can modify the content and recompute every hash. To detect deliberate tampering, either (a) require a signature from a trusted public key (§10), or (b) compare against a root_hash kept somewhere trustworthy. In an encrypted archive only someone who knows the password can change the content (AEAD), but telling apart changes made by different people who share the password again takes a signature.
+- `root_hash` also serves as the archive's fingerprint (digest). Recording just these 32 bytes, for example on a public board or a blockchain, makes it possible to confirm later that an archive is the same one.
+- Decoders MUST check root_hash before parsing the index, MUST check each block's hash before writing data from it, and MUST check each file's hash after extracting it when hash_len > 0.
+
+## 13. Encryption
+
+```
+password = the user's password, Unicode NFC-normalized, as UTF-8 bytes
+master = Argon2id(password, salt, m_kib, t_cost, p_lanes, 32-byte output, no secret or associated data, version 0x13)
 key    = BLAKE3.derive_key("ezpz v1 data encryption key", master)
-nonce  = archive_id(16) ‖ u64le(counter)          # 24바이트
-암호문 = XChaCha20-Poly1305(key, nonce, aad = 16바이트 프레임 헤더, 평문 = 압축된 데이터)
+nonce  = archive_id(16) ‖ u64le(counter)          # 24 bytes
+ciphertext = XChaCha20-Poly1305(key, nonce, aad = the 16-byte frame header, plaintext = compressed data)
 ```
 
-| 대상 | counter |
+| Target | counter |
 |---|---|
-| 데이터 블록 k | k |
-| 카탈로그 | 2^64 − 1 |
+| data block k | k |
+| catalog | 2^64 - 1 |
 
-- 압축 → 암호화 순서입니다. frame의 stored_len = 압축 크기 + 16(태그)이며, 프레임 헤더 전체가 aad로 묶여 코덱·크기 변조도 막습니다.
-- 블록 순서를 바꾸면 counter가 맞지 않아 복호화가 실패합니다.
-- 카탈로그가 암호화되므로 **파일 이름, 크기, 시각, 폴더 구조가 모두 숨겨집니다**(zip 암호화는 이름이 보임).
-- 디코더는 KDF 매개변수가 `1 ≤ p ≤ 16`, `1 ≤ t ≤ 64`, `8p ≤ m_kib ≤ 4 GiB(4194304)` 범위를 벗어나면 거부해야 합니다(MUST). 악의적인 파일이 메모리를 터뜨리지 못하게요.
-- 레퍼런스 인코더 기본값: m = 64 MiB, t = 3, p = 1.
-- NFC 정규화를 하는 이유: 같은 한글 비밀번호라도 운영체제나 입력기에 따라 자모가 조합된 형태(NFC)와 분리된 형태(NFD)로 들어올 수 있어서, 정규화하지 않으면 "맞는 비밀번호인데 안 열리는" 일이 생겨요.
-- 비밀번호가 틀리면 카탈로그 복호화(태그 검증)에서 실패합니다.
+- Data is compressed first, then encrypted. A frame's stored_len is the compressed size plus 16 (the tag), and the whole frame header is bound as aad, so the codec and the sizes cannot be altered either.
+- Reordering blocks breaks decryption, because the counters no longer match.
+- Since the catalog is encrypted, file names, sizes, times, and the folder structure are all hidden (zip encryption leaves names visible).
+- Decoders MUST reject KDF parameters outside `1 ≤ p ≤ 16`, `1 ≤ t ≤ 64`, `8p ≤ m_kib ≤ 4 GiB (4194304)`, so that a malicious file cannot exhaust memory.
+- Reference encoder defaults: m = 64 MiB, t = 3, p = 1.
+- The reason for NFC: the same Korean (Hangul) password can arrive with its syllables composed (NFC) or split into jamo (NFD), depending on the operating system or the input method. Without normalization, a correct password could fail to open the archive.
+- A wrong password fails when the catalog is decrypted (tag verification).
 
-## 14. 읽기 절차 (디코더)
+## 14. Reading procedure (decoder)
 
-1. 파일 길이 L ≥ 96인지 확인.
-2. 헤더 32바이트 읽고 매직·버전·flags 확인 → 확장 E바이트 읽고 레코드 해석.
-3. 마지막 64바이트(트레일러) 읽기: end_magic, check, flags, archive_len == L.
-4. 서명 플래그 일치 확인. 인덱스 영역 = [index_offset, L − 64 − (서명 ? 104 : 0)).
-5. 인덱스 영역을 읽고 BLAKE3(헤더 ‖ 인덱스 영역) == root_hash 확인.
-6. 서명이 있으면 root_hash에 대한 서명 검증.
-7. 블록 테이블 프레임을 풀고 해석, 블록 오프셋 계산, 끝 == index_offset 확인.
-8. 카탈로그 프레임: 매직 `EZCT`, 시작 위치(블록 테이블 바로 뒤)와 끝(인덱스 영역 끝) 일치, 암호화 비트 == 헤더 암호화 비트, codec ∈ {0,1,2}, raw_len ≤ 1 GiB 확인. 암호화면 키 유도 후 복호화(aad = 카탈로그 프레임 헤더). 풀고 해석하며 §8의 모든 제약 확인.
-9. 파일을 읽을 때: 필요한 블록만 읽기 → 블록 해시 확인 → 복호화 → 압축 해제(raw_len 일치 확인) → 조각 잘라 이어 붙이기 → 변환 되돌리기 → 파일 해시 확인.
+1. Check that the file length L ≥ 96.
+2. Read the 32-byte header and check the magic, version, and flags; then read the E extension bytes and parse the records.
+3. Read the last 64 bytes (the trailer) and check end_magic, check, flags, and archive_len == L.
+4. Check that the signature flags agree. Index region = [index_offset, L - 64 - (signed ? 104 : 0)).
+5. Read the index region and check BLAKE3(header ‖ index region) == root_hash.
+6. If the archive is signed, verify the signature over root_hash.
+7. Decode and parse the block table frame, compute the block offsets, and check that they end at index_offset.
+8. Catalog frame: check the magic `EZCT`, that it starts right after the block table and ends at the end of the index region, that its encryption bit equals the header's, that codec ∈ {0,1,2}, and that raw_len ≤ 1 GiB. If encrypted, derive the key and decrypt (aad = the catalog frame header). Decode and parse it, checking every constraint in §8.
+9. To read a file: read only the blocks it needs → check each block hash → decrypt → decompress (check raw_len) → cut out and join the chunks → undo the transform → check the file hash.
 
-비밀번호 없이 할 수 있는 일: 1~7단계와 모든 블록의 해시 검사(= 손상 검사), 서명 검사(서명이 있고 신뢰하는 키와 일치하면 변조까지 검사).
+Without the password, a reader can still carry out steps 1 to 7 and check every block hash (a damage check), and verify the signature (which also detects tampering when a signature is present and matches a trusted key).
 
-## 15. 인코더 권장 사항 (참고, 비규범)
+## 15. Encoder recommendations (informative)
 
-디코더는 아래 내용을 몰라도 됩니다. 같은 포맷 안에서 인코더가 얼마나 똑똑한지의 문제예요.
+Decoders do not need anything in this section. It describes how the reference encoder makes good use of the format.
 
-### 15.1 파일 분류와 정렬
-- 앞부분 64 KiB를 보고 분류: 실행 파일(ELF·Mach-O·PE 헤더로 아키텍처 판별), 이미 압축된 파일(확장자·매직·빠른 시험 압축으로 판별), 그 외.
-- 이미 압축된 파일은 별도 블록에 모아 store로 저장(시간 낭비 없음).
-- 실행 파일은 (아키텍처, 크기) 순: 같은 프로그램의 비슷한 빌드끼리 붙고, 거대한 파일 하나가 관련 파일들을 멀리 떼어 놓지 않게.
-- 나머지는 (확장자, 파일 이름, 경로) 순: 예를 들어 여러 버전에 있는 같은 이름의 파일이 나란히 놓이게.
+### 15.1 Classifying and ordering files
+- Classify each file from its first 64 KiB: executables (architecture detected from ELF, Mach-O, or PE headers), already-compressed files (detected by extension, magic bytes, and a quick trial compression), and everything else.
+- Group already-compressed files into separate blocks stored with codec 0, which saves time.
+- Order executables by (architecture, size), so that similar builds of the same program sit together and one huge file does not push related files far apart.
+- Order everything else by (extension, file name, path), so that, for example, files with the same name from different versions end up side by side.
 
-### 15.2 내용 기반 조각내기
-- FastCDC(2020) 최소 16 KiB / 평균 64 KiB / 최대 256 KiB.
-- 조각의 BLAKE3로 중복 판단. 조각은 블록 경계를 넘지 않게.
+### 15.2 Content-defined chunking
+- FastCDC (2020) with a minimum of 16 KiB, an average of 64 KiB, and a maximum of 256 KiB.
+- Duplicates are detected by each chunk's BLAKE3 hash. Chunks never cross block boundaries.
 
-### 15.3 레벨 (레퍼런스 구현)
+### 15.3 Levels (reference implementation)
 
-| 레벨 | 코덱 | 블록 |
+| Level | Codec | Block |
 |---|---|---|
 | 1 | zstd 1 | 4 MiB |
 | 2 | zstd 3 | 4 MiB |
@@ -640,49 +642,48 @@ nonce  = archive_id(16) ‖ u64le(counter)          # 24바이트
 | 4 | zstd 9 (+LDM) | 8 MiB |
 | 5 | zstd 12 | 16 MiB |
 | 6 | zstd 16 | 16 MiB |
-| **7 (기본)** | zstd 19 (+LDM) | 32 MiB |
+| **7 (default)** | zstd 19 (+LDM) | 32 MiB |
 | 8 | zstd 22 | 64 MiB |
-| 9 | zstd 22와 LZMA2 9e 둘 다 해 보고 작은 쪽 | 64 MiB |
-| 10 (`--max`) | 뇌 코덱 | 64 MiB |
+| 9 | tries zstd 22 and LZMA2 9e, keeps the smaller | 64 MiB |
+| 10 (`--max`) | brain codec | 64 MiB |
 
-블록은 서로 독립이라 여러 코어에서 동시에 압축·해제합니다.
+Blocks are independent of each other, so they are compressed and extracted on several cores at once.
 
-## 16. 보안 고려 사항
+## 16. Security considerations
 
-- **경로 공격(zip-slip)**: §8의 경로 규칙을 반드시 검사합니다. 추출기는 심볼릭 링크를 **모든 일반 파일을 쓴 뒤** 만들어야 하고(SHOULD), 압축 폴더 밖이나 절대 경로를 가리키는 링크는 사용자가 허락하지 않으면 만들지 않아야 합니다(SHOULD).
-- **압축 폭탄**: 블록 raw_len 상한(256 MiB), 인덱스 상한(1 GiB), LZMA2 사전 상한, 뇌 코덱 tb 상한, zstd 윈도 상한으로 블록 하나가 쓰는 메모리를 제한합니다. 추출기는 전체 해제 크기를 미리 계산해(조각 길이 합) 사용자에게 보여 주거나 한도를 걸 수 있습니다.
-- **변조**: 쓰기 전에 블록 해시를, 쓴 뒤 파일 해시를 확인합니다. 서명 아카이브에서 서명이 틀리면 아무것도 풀지 않습니다. 의도적 변조에 대한 보호는 §12를 보세요.
-- **이름 충돌**: 대소문자를 구분하지 않는 파일 시스템(윈도·맥 기본값)에서는 `A.txt`와 `a.txt`가 같은 파일이 되고, 맥은 유니코드 정규화가 달라도 같은 이름으로 볼 수 있어요. 윈도에서는 `CON`, `NUL`, `COM1` 같은 예약어와 이름 속 `:`(대체 데이터 스트림)도 위험합니다. 추출기는 이런 충돌을 감지하면 덮어쓰지 말고 이름을 바꾸거나 멈춰야 합니다(SHOULD).
-- **권한**: setuid·setgid·sticky 비트는 기본적으로 복원하지 않습니다(§8).
-- **암호화의 한계**: 블록 개수와 크기는 숨겨지지 않습니다. 비밀번호 강도가 곧 보안 강도입니다.
+- **Path attacks (zip-slip)**: always check the path rules in §8. Extractors SHOULD create symbolic links after writing all regular files, and SHOULD NOT create links that point outside the extraction folder or to absolute paths unless the user allows it.
+- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb, and zstd window cap the memory a single block can use. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
+- **Tampering**: check block hashes before writing and file hashes afterwards. If a signed archive's signature does not verify, extract nothing. See §12 for protection against deliberate tampering.
+- **Name collisions**: on case-insensitive file systems (the default on Windows and macOS), `A.txt` and `a.txt` are the same file, and macOS may treat names that differ only in Unicode normalization as the same name. On Windows, reserved names such as `CON`, `NUL`, and `COM1`, and a `:` inside a name (alternate data streams), are also dangerous. An extractor that detects such a collision SHOULD rename the file or stop, and not overwrite.
+- **Permissions**: setuid, setgid, and sticky bits are not restored by default (§8).
+- **Limits of encryption**: the number and sizes of blocks are not hidden, and the encryption is only as strong as the password.
 
-## 17. 버전과 확장
+## 17. Versioning and extensions
 
-- 호환이 깨지는 변경은 version_major를 올립니다.
-- 새 기능은 (a) 새 코덱 id, (b) 헤더 확장 레코드(필요하면 필수 비트), (c) 새 flags 비트로 추가합니다. 옛 디코더는 모르는 것을 만나면 조용히 틀리지 않고 **명확히 거부**하도록 설계했습니다.
+- Incompatible changes increase version_major.
+- New features are added as (a) new codec ids, (b) header extension records, with the critical bit if needed, or (c) new flag bits. Older decoders are designed to reject anything they do not understand, with a clear error, instead of silently producing wrong output.
 
-## 18. 앞으로 (v1.x 이후 후보)
+## 18. Future work (candidates for v1.x and later)
 
-- **타고난 지식(사전 학습)**: 뇌 코덱이 자주 쓰이는 텍스트·코드 패턴을 미리 배운 상태에서 출발 → 작은 파일에서 특히 이득.
-- **복구 기록**: 리드-솔로몬 패리티 블록으로 일부가 손상돼도 복원.
-- **추가(append)**: 기존 아카이브에 새 파일을 넣을 때 기존 조각과 중복 제거.
-- **deflate 재압축**: zip·docx·png 안의 deflate 스트림을 풀어서 더 잘 압축하고, 풀 때 원래 바이트 그대로 되돌리기.
-- **브라우저 디코더**: WebAssembly로 웹에서 바로 열기.
-- **스트리밍 읽기**: 탐색 없이 순서대로 풀 수 있는 모드.
+- **Built-in knowledge (pretraining)**: start the brain codec from a state that has already learned common text and code patterns, which helps small files most.
+- **Recovery records**: Reed-Solomon parity blocks that repair partial damage.
+- **Append**: add files to an existing archive while deduplicating against the chunks already stored.
+- **Deflate recompression**: decompress the deflate streams inside zip, docx, and png files to compress them better, and restore the original bytes exactly on extraction.
+- **Browser decoder**: open archives directly on the web with WebAssembly.
+- **Streaming read**: a mode that can be decoded in order without seeking.
 
-## 부록 A. 독립 구현 검증 기록
+## Appendix A. Independent implementation check
 
-이 규격서가 "규격서만 보고도 호환되는 구현을 만들 수 있을 만큼" 정확한지 확인하려고, 레퍼런스 구현(Rust)을 전혀 보지 않고 **이 문서만으로** 파이썬 해제기를 따로 만들었어요(`tools/ezpz_reader.py`).
+To find out whether this specification is precise enough to build a compatible implementation from the document alone, a separate Python decoder was written from this document only, without looking at the Rust reference implementation (`tools/ezpz_reader.py`).
 
-| 검증 항목 | 결과 |
+| Check | Result |
 |---|---|
-| 헤더·트레일러·root_hash·블록 테이블·카탈로그 해석 | 통과 |
-| store / zstd / LZMA2 / 뇌 코덱 해제 (뇌 코덱 tb=16, tb=20) | 통과, 레퍼런스 구현과 바이트 단위 동일 |
-| x86·ARM64 파일 변환 되돌리기 | 통과 |
-| 중복 제거된 조각 참조(여러 블록에 걸친 참조 포함) | 통과 |
-| 암호화(Argon2id + BLAKE3 derive_key + XChaCha20-Poly1305), 틀린 비밀번호 거부 | 통과 |
-| Ed25519 서명 검증, 공개키 불일치·서명 없는 파일 거부 | 통과 |
-| 1바이트 변조 시험(블록, 카탈로그, 헤더, 트레일러, 서명) | 모두 예상한 단계에서 거부 |
+| Parsing the header, trailer, root_hash, block table, and catalog | pass |
+| Decoding store / zstd / LZMA2 / brain codec (brain codec at tb=16 and tb=20) | pass, byte-for-byte identical to the reference implementation |
+| Undoing the x86 and ARM64 file transforms | pass |
+| Deduplicated chunk references (including references across blocks) | pass |
+| Encryption (Argon2id + BLAKE3 derive_key + XChaCha20-Poly1305), rejecting a wrong password | pass |
+| Ed25519 signature verification, rejecting a mismatched public key or an unsigned file | pass |
+| One-byte tampering tests (block, catalog, header, trailer, signature) | all rejected at the expected step |
 
-검증 과정에서 나온 모호한 부분 20여 곳(LZMA2 사전 상한 계산 오류, 조각 참조 차분의 기준, 암호화된 store 블록 길이, 서명 키 비교, 비밀번호 정규화 등)은 모두 이 판에 반영했어요.
-
+About 20 unclear points found during this check (a miscalculated LZMA2 dictionary limit, the base of the chunk reference delta, the length of encrypted store blocks, the signature key comparison, password normalization, and others) have all been fixed in this edition.

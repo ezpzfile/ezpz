@@ -1,76 +1,92 @@
-# ezpz: `.ezpz` 아카이브 포맷 레퍼런스 구현
+# ezpz: reference implementation of the `.ezpz` archive format
 
-zip·7z 같은 "여러 파일을 묶고 줄이는" 포맷이에요. 검증된 압축기(zstd, LZMA2)를 똑똑하게 조합하고, 직접 만든 **뇌 코덱**(예측 부호화 + 실시간으로 배우는 신경망)을 최대 압축 모드로 넣었어요.
+English | [한국어](README.ko.md)
 
-- 규격서: [SPEC.md](SPEC.md)
-- 벤치마크: [BENCHMARK.md](BENCHMARK.md)
+`.ezpz` is an archive format in the same family as zip and 7z: it packs many files into one and compresses them. It combines proven compressors (zstd and LZMA2) with content-defined deduplication, solid blocks, encryption, and signatures. For maximum compression it adds a codec of its own, the brain codec, which predicts every bit before coding it and keeps learning as it goes.
 
-## 빌드
+- Specification: [SPEC.md](SPEC.md)
+- Benchmark: [BENCHMARK.md](BENCHMARK.md)
 
-Rust 1.80 이상이 필요해요. (맥: `brew install rust` 또는 https://rustup.rs)
+## Results at a glance
+
+Size of the maximum compression mode (`ezpz --max`, the brain codec) compared with the best settings of xz and 7z. Negative numbers mean the ezpz archive is that much smaller.
+
+| Dataset | vs xz -9e | vs 7z -mx9 |
+|---|---|---|
+| Wikipedia text (enwik8, 100 MB) | -17.4% | -17.5% |
+| Silesia corpus | -13.6% | -14.1% |
+| Python install folder | -13.1% | -12.5% |
+| Backup of three Python versions | -4.8% | -2.4% |
+| Linux executables | -1.6% | +8.7% |
+
+The default level produces archives about the size of tar.zst -19 and can pull a single file out in under 0.1 s. The full numbers are in [BENCHMARK.md](BENCHMARK.md).
+
+## Build
+
+You need Rust 1.85 or newer (the crate uses edition 2024). On macOS, `brew install rust` works, or use https://rustup.rs.
 
 ```bash
 cargo build --release
-# 실행 파일: target/release/ezpz
+# binary: target/release/ezpz
 ```
 
-외부 라이브러리(zstd, liblzma)는 소스째 같이 빌드되므로 따로 설치할 게 없어요.
+The zstd and liblzma libraries are built from source along with the crate, so there is nothing else to install.
 
-## 사용법
+## Usage
 
 ```bash
-# 압축 (기본 레벨 7: tar.zst -19 수준으로 작고, 푸는 건 아주 빠름)
-ezpz c 프로젝트.ezpz 내폴더/ 다른파일.txt
+# Compress (default level 7: about as small as tar.zst -19, and very fast to extract)
+ezpz c project.ezpz my-folder/ notes.txt
 
-# 레벨: 1(제일 빠름) ~ 9(제일 작게), --max 는 뇌 코덱(가장 작지만 느림)
-ezpz c 보관용.ezpz 내폴더/ -l 9
-ezpz c 보관용.ezpz 내폴더/ --max
+# Levels go from 1 (fastest) to 9 (smallest); --max uses the brain codec (smallest, but slow)
+ezpz c archive.ezpz my-folder/ -l 9
+ezpz c archive.ezpz my-folder/ --max
 
-# 풀기 / 일부만 풀기
-ezpz x 프로젝트.ezpz -C 풀폴더/
-ezpz x 프로젝트.ezpz 내폴더/docs -C 풀폴더/
+# Extract everything, or only part of the archive
+ezpz x project.ezpz -C out/
+ezpz x project.ezpz my-folder/docs -C out/
 
-# 목록, 파일 하나만 바로 보기(필요한 블록만 읽음)
-ezpz l 프로젝트.ezpz
-ezpz cat 프로젝트.ezpz 내폴더/README.md
+# List the contents, or print one file (only the blocks that hold it are read)
+ezpz l project.ezpz
+ezpz cat project.ezpz my-folder/README.md
 
-# 무결성 검사
-ezpz verify 프로젝트.ezpz
+# Check integrity
+ezpz verify project.ezpz
 
-# 암호화 (파일 이름까지 숨김). 비밀번호는 물어보거나 --password / EZPZ_PASSWORD
-ezpz c 비밀.ezpz 내폴더/ -e
+# Encrypt (file names are hidden too). The password is prompted for, or taken from --password / EZPZ_PASSWORD
+ezpz c secret.ezpz my-folder/ -e
 
-# 비밀번호 없이도 손상·변조 검사는 가능
-ezpz verify 비밀.ezpz --no-password
+# Damage checks work without the password (tamper checks too, if the archive is signed)
+ezpz verify secret.ezpz --no-password
 
-# 전자 서명: 키 만들기 → 서명해서 압축 → 받는 사람이 공개키로 확인
-ezpz keygen 나
-ezpz c 배포.ezpz 내폴더/ --sign 나.key
-ezpz verify 배포.ezpz --pubkey 나.pub
+# Signatures: create a key pair, sign while compressing, and let the recipient check with the public key
+ezpz keygen me
+ezpz c release.ezpz my-folder/ --sign me.key
+ezpz verify release.ezpz --pubkey me.pub
 
-# 아카이브 정보(코덱별 블록, 중복 제거량, 지문 등)
-ezpz info 프로젝트.ezpz
+# Archive details (blocks per codec, bytes saved by deduplication, fingerprint, ...)
+ezpz info project.ezpz
 ```
 
-자주 쓰는 옵션: `-j N`(스레드 수), `--block-size MiB`, `--codec zstd|lzma2|brain|store`, `--no-dedup`, `--no-filter`, `--hash-len 0|16|32`, `-f/--force`(덮어쓰기), `--unsafe-links`(폴더 밖을 가리키는 심볼릭 링크도 만들기).
+Other useful options: `-j N` (number of threads), `--block-size MiB`, `--codec zstd|lzma2|brain|store`, `--no-dedup`, `--no-filter`, `--hash-len 0|16|32`, `-f/--force` (overwrite existing files), and `--unsafe-links` (also create symbolic links that point outside the target folder).
 
-## 구조 (소스 파일)
+## Source layout
 
-| 파일 | 하는 일 |
+| File | Purpose |
 |---|---|
-| `src/format.rs` | 헤더·프레임·트레일러·서명 섹션의 바이트 배치, varint, 경로 규칙 |
-| `src/index.rs` | 블록 테이블과 카탈로그(열 단위 인덱스) 인코딩/디코딩 |
-| `src/codec.rs` | store / zstd / LZMA2 / brain 코덱 연결 |
-| `src/brain.rs` | 뇌 코덱: 컨텍스트 모델 9개 + 매치 모델 + 신경망 믹서 3개 + APM + 산술 부호기 |
-| `src/filter.rs` | 실행 파일 전처리(x86 E8/E9, ARM64 BL) |
-| `src/classify.rs` | 파일 분류(실행 파일 / 이미 압축됨 / 일반) |
-| `src/create.rs` | 압축기: 분류 → 정렬 → 내용 기반 조각내기 → 중복 제거 → 블록 병렬 압축 |
-| `src/archive.rs` | 해제기: 검증, 블록 캐시, 랜덤 접근, 안전한 추출 |
-| `src/crypto.rs` | Argon2id + XChaCha20-Poly1305 |
+| `src/format.rs` | byte layout of the header, frames, trailer, and signature section; varints; path rules |
+| `src/index.rs` | encoding and decoding of the block table and the catalog (a column-oriented index) |
+| `src/codec.rs` | glue for the store, zstd, LZMA2, and brain codecs |
+| `src/brain.rs` | brain codec: 9 context models, a match model, 3 neural mixers, APM stages, and an arithmetic coder |
+| `src/filter.rs` | executable transforms (x86 E8/E9, ARM64 BL) |
+| `src/classify.rs` | file classification (executable / already compressed / other) |
+| `src/create.rs` | archiver: classify, sort, split into content-defined chunks, deduplicate, compress blocks in parallel |
+| `src/archive.rs` | extractor: verification, block cache, random access, safe extraction |
+| `src/crypto.rs` | Argon2id and XChaCha20-Poly1305 |
 
-## 독립 구현 검증
+## Independent implementation
 
-`tools/ezpz_reader.py`는 **SPEC.md만 보고** 따로 만든 파이썬 해제기예요(Rust 코드를 보지 않고 작성). `testvectors/`의 아카이브를 이 해제기로 풀어서 원본과 비교하면 규격서만으로 호환 구현이 가능하다는 걸 확인할 수 있어요.
+`tools/ezpz_reader.py` is a Python decoder written only from SPEC.md, without looking at the Rust code. Decoding the archives in `testvectors/` with it and comparing the output with the original files shows that the specification alone is enough to build a compatible implementation.
 
 ```bash
 pip install zstandard blake3 cryptography
@@ -78,22 +94,23 @@ python3 tools/ezpz_reader.py testvectors/brain.ezpz --out /tmp/out --compare tes
 python3 tools/ezpz_reader.py testvectors/signed.ezpz --pub testvectors/k.pub
 ```
 
-## 테스트
+To decode encrypted archives, also install `argon2-cffi` and `pynacl` and pass `--password`.
+
+## Tests
 
 ```bash
-cargo test --release      # 단위 테스트 (포맷, 변조된 인덱스 거부, 경로 공격 등)
-tests/e2e.sh              # 실제 CLI로 왕복·변조·암호·서명 시나리오
+cargo test --release      # unit tests (format, rejection of tampered indexes, path attacks, ...)
+tests/e2e.sh              # end-to-end CLI scenarios: round trips, tampering, encryption, signatures
 ```
 
-## 솔직한 한계
+## Limitations
 
-- 뇌 코덱은 텍스트·표준 테스트 세트·프로그램 폴더에서 xz·7z보다 12~18% 작지만, 압축과 해제가 둘 다 느려요(2코어 개발 서버에서 초당 약 1MB). 파일 하나를 꺼낼 때도 그 파일이 든 블록(최대 64MB)을 통째로 풀어야 해요. 그래서 기본값이 아니라 `--max`에서만 써요.
-- 실행 파일은 아직 7z가 더 작아요(약 9%). 7z의 x86 전용 전처리기(BCJ2)만큼 정교한 처리가 없어서예요.
-- 이미 압축된 데이터(jpg, mp4, zip 등)는 어떤 방법으로도 거의 줄지 않아요. ezpz는 이런 파일을 알아보고 그대로 저장해서 시간만 아껴요.
-- 서명 없는 아카이브의 해시 검사는 **실수로 생긴 손상**(전송 오류, 디스크 손상)을 잡아요. 누군가 **일부러 고친 것**까지 확인하려면 `--sign`으로 서명하고, 받는 쪽에서 `verify --pubkey`로 확인하세요(공개키를 지정하면 서명 없는 파일은 거부돼요).
-- 아직 v1 초안이에요. 규격이 바뀔 수 있으니 중요한 데이터의 유일한 보관본으로는 쓰지 마세요.
+- The brain codec is 12 to 18% smaller than xz and 7z on text, the Silesia corpus, and program folders, but it is slow in both directions (about 1 MB/s on a 2-core development server). Extracting one file also means decoding the whole block that contains it (up to 64 MB). That is why only `--max` uses it.
+- 7z still makes smaller archives of executables, by about 9%. ezpz has nothing as elaborate as 7z's x86 preprocessor (BCJ2) yet.
+- Already-compressed data (jpg, mp4, zip, ...) barely shrinks with any method. ezpz recognizes such files and stores them as they are, which saves time.
+- Hash checks on an unsigned archive catch accidental damage such as transfer or disk errors. To detect deliberate changes too, sign the archive with `--sign` and have the recipient run `verify --pubkey`. When a public key is given, unsigned files are rejected.
+- This is a v1 draft and the format may still change. Do not use it as the only copy of important data.
 
-## 라이선스
+## License
 
-[MIT 라이선스](LICENSE)로 공개해요. 규격서(SPEC.md)를 보고 다른 언어로 호환 구현을 만드는 것도 자유예요.
-
+Released under the [MIT License](LICENSE). You are free to build compatible implementations in other languages from the specification ([SPEC.md](SPEC.md)).
