@@ -9,15 +9,15 @@ English | [한국어](README.ko.md)
 
 ## Results at a glance
 
-Size of the maximum compression mode (`ezpz --max`, the brain codec) compared with the best settings of xz and 7z. Negative numbers mean the ezpz archive is that much smaller.
+Archive sizes from the maximum compression mode (`ezpz --max`, the brain codec) next to the best settings of xz and 7z. The last column compares ezpz with whichever of the two made the smaller file.
 
-| Dataset | vs xz -9e | vs 7z -mx9 |
-|---|---|---|
-| Wikipedia text (enwik8, 100 MB) | -17.4% | -17.5% |
-| Silesia corpus | -13.6% | -14.1% |
-| Python install folder | -13.1% | -12.5% |
-| Backup of three Python versions | -4.8% | -2.4% |
-| Linux executables | -1.6% | +8.7% |
+| Data | Original | ezpz --max | xz -9e | 7z -mx9 | Result |
+|---|---|---|---|---|---|
+| Wikipedia text (enwik8) | 100.0 MB | **20.5 MB** | 24.8 MB | 24.9 MB | 17.4% smaller than xz -9e |
+| Silesia corpus | 211.9 MB | **41.8 MB** | 48.4 MB | 48.7 MB | 13.6% smaller than xz -9e |
+| Python install folder | 53.2 MB | **7.9 MB** | 9.1 MB | 9.1 MB | 12.5% smaller than 7z -mx9 |
+| Backup of three Python versions | 158.2 MB | **23.1 MB** | 24.3 MB | 23.7 MB | 2.4% smaller than 7z -mx9 |
+| Linux executables | 104.9 MB | 22.7 MB | 23.1 MB | **20.9 MB** | 8.7% larger than 7z -mx9 |
 
 The default level produces archives about the size of tar.zst -19 and can pull a single file out in under 0.1 s. The full numbers are in [BENCHMARK.md](BENCHMARK.md).
 
