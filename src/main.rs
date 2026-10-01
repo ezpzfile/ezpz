@@ -36,6 +36,7 @@ enum CodecArg {
     Zstd,
     Lzma2,
     Brain,
+    BrainFast,
     Store,
 }
 
@@ -47,10 +48,11 @@ enum Cmd {
         archive: PathBuf,
         #[arg(required = true)]
         inputs: Vec<PathBuf>,
-        /// 1 (fastest) .. 9 (smallest, zstd/LZMA2), 10 = max (brain codec). Default 7
-        #[arg(short, long, default_value_t = create::DEFAULT_LEVEL, value_parser = clap::value_parser!(u8).range(1..=10))]
+        /// 1 (fastest) .. 9 (smallest of the fast-to-extract levels, zstd/LZMA2),
+        /// 10 = max (fast brain codec), 11 = smallest (brain codec, slowest). Default 7
+        #[arg(short, long, default_value_t = create::DEFAULT_LEVEL, value_parser = clap::value_parser!(u8).range(1..=create::MAX_LEVEL as i64))]
         level: u8,
-        /// Same as --level 10: predictive "brain" codec, smallest but slow
+        /// Same as --level 10: the fast "brain" codec. Strongest on text, slow to extract (-l 11 is smaller still)
         #[arg(long)]
         max: bool,
         #[arg(long, value_enum, default_value_t = CodecArg::Auto)]
@@ -139,6 +141,9 @@ enum Cmd {
         files: Vec<PathBuf>,
         #[arg(long)]
         check: bool,
+        /// Use the fast profile (codec 4)
+        #[arg(long)]
+        fast: bool,
     },
 }
 
@@ -273,6 +278,7 @@ fn run() -> Result<()> {
                     CodecArg::Zstd => CodecChoice::Zstd,
                     CodecArg::Lzma2 => CodecChoice::Lzma2,
                     CodecArg::Brain => CodecChoice::Brain,
+                    CodecArg::BrainFast => CodecChoice::BrainFast,
                     CodecArg::Store => CodecChoice::Store,
                 },
                 block_size: block_size.map(|m| m << 20),
@@ -314,8 +320,8 @@ fn run() -> Result<()> {
                 }
                 let c = s.codec_blocks;
                 eprintln!(
-                    "  {} blocks (store {}, zstd {}, lzma2 {}, brain {})",
-                    s.blocks, c[0], c[1], c[2], c[3]
+                    "  {} blocks (store {}, zstd {}, lzma2 {}, brain {}, brain-fast {})",
+                    s.blocks, c[0], c[1], c[2], c[3], c[4]
                 );
             }
         }
@@ -555,27 +561,31 @@ fn run() -> Result<()> {
             let _ = ar.catalog_offset();
         }
 
-        Cmd::Tune { files, check } => {
+        Cmd::Tune { files, check, fast } => {
+            let profile = if fast { brain::Profile::Fast } else { brain::Profile::Full };
             use rayon::prelude::*;
-            let res: Vec<(String, usize, f64, bool)> = files
+            let res: Vec<(String, usize, f64, f64, bool, String)> = files
                 .par_iter()
                 .map(|f| {
                     let d = std::fs::read(f).unwrap();
                     let t = std::time::Instant::now();
-                    let c = brain::compress(&d);
+                    let c = brain::compress(&d, profile);
                     let secs = t.elapsed().as_secs_f64();
+                    let t2 = std::time::Instant::now();
                     let ok = !check
-                        || brain::decompress(&c, d.len())
+                        || brain::decompress(&c, d.len(), profile)
                             .map(|x| x == d)
                             .unwrap_or(false);
-                    (f.display().to_string(), c.len(), secs, ok)
+                    let dsecs = if check { t2.elapsed().as_secs_f64() } else { 0.0 };
+                    let h = hex::encode(&blake3::hash(&c).as_bytes()[..6]);
+                    (f.display().to_string(), c.len(), secs, dsecs, ok, h)
                 })
                 .collect();
             let mut total = 0;
-            for (f, n, s, ok) in &res {
+            for (f, n, s, ds, ok, h) in &res {
                 total += n;
                 println!(
-                    "{f:<24} {n:>10} {s:>7.2}s {}",
+                    "{f:<24} {n:>10} {s:>7.2}s {ds:>7.2}s {h} {}",
                     if *ok { "" } else { "ROUNDTRIP FAIL" }
                 );
             }

@@ -8,20 +8,23 @@ import json, os
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
 
-v1 = [json.loads(l) for l in open(os.path.join(HERE, "results_v1.jsonl"))]
-v2 = [json.loads(l) for l in open(os.path.join(HERE, "results_v2.jsonl"))]
+load = lambda name: [json.loads(l) for l in open(os.path.join(HERE, name))]
+# v2 measured the full brain codec with 64 MiB blocks under its old name, "--max".
+# That setting is now level 11 and produces the same compressed data, so the rows are relabeled.
+RENAMED = {"ezpz --max (brain)": "ezpz -l 11"}
 rows = {}
-for r in v1:
+for r in load("results_v1.jsonl"):
     if "ezpz" not in r["method"]:
         rows[(r["dataset"], r["method"])] = r
-for r in v2:  # later rows win
+for r in load("results_v2.jsonl") + load("results_v3.jsonl"):  # later rows win
+    r = dict(r, method=RENAMED.get(r["method"], r["method"]))
     rows[(r["dataset"], r["method"])] = r
 
 DATASETS = ["text", "silesia", "source", "backups", "binaries"]
 # Method keys as stored in the result files.
 METHODS = ["zip -9", "tar.gz -9", "tar.zst -19 --long", "tar.xz -9e", "7z -mx9",
-           "ezpz -l 3", "ezpz (default -l 7)", "ezpz -l 9", "ezpz --max (brain)"]
-MAX = "ezpz --max (brain)"
+           "ezpz -l 3", "ezpz (default -l 7)", "ezpz -l 9", "ezpz --max (-l 10)", "ezpz -l 11"]
+BRAIN = [("ezpz --max (-l 10)", "ezpz --max"), ("ezpz -l 11", "ezpz -l 11")]  # (result key, column name)
 RIVALS = [("tar.xz -9e", "xz -9e"), ("7z -mx9", "7z -mx9")]  # (result key, short name)
 
 # Original (uncompressed) size of each dataset, in bytes.
@@ -38,21 +41,22 @@ L = {
         "setup_h": "## Test setup",
         "setup": [
             "- A 2-core Intel Xeon 2.1 GHz virtual server (on the slow side), Linux. Every tool that supports threads ran with 2 threads (`zstd -T2`, `xz -T2`, `7z -mmt=2`, `ezpz -j2`).",
-            "- Versions: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.1.0",
+            "- Versions: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.1.0 (0.2.0 for the `--max` rows; levels 1 to 9 and 11 produce the same data in both)",
             "- Each measurement was taken once on an otherwise idle server, so expect a few percent of noise in the timings.",
             "- Sizes read original → compressed, in MB (1 MB = 1,000,000 bytes). The compressed size is the whole archive file, index included. \"80% smaller\" means the archive is one fifth the size of the original.",
             "- Single file is the time to extract one small file (for example `json/decoder.py`) from the archive. The tar formats have to be decompressed from the start to reach it.",
             "- Peak RAM is the most memory (RAM) the tool used while compressing / extracting. It is not a file size.",
             "- Every ezpz extraction was compared byte for byte with the original.",
+            "- `--max` is level 10: the fast brain codec (codec 4) with 16 MiB blocks. `-l 11` is the full brain codec (codec 3) with 64 MiB blocks. The `-l 11` rows were measured with the previous build, where this setting was called `--max`; the compressed data is byte-for-byte the same.",
         ],
         "summary_h": "## Summary: size after compression, in MB (smaller is better)",
         "method": "Method",
         "original_row": "**Original (before compression)**",
         "best_mark": "",
         "mb": " MB",
-        "max_h": "### The brain codec (`--max`) against the best existing settings",
-        "max_cols": "| Dataset | Original | ezpz --max | xz -9e | 7z -mx9 | Result |",
-        "max_note": "Result compares ezpz --max with whichever of xz and 7z made the smaller file.",
+        "max_h": "### The brain codecs against the best existing settings",
+        "max_cols": "| Dataset | Original | xz -9e | 7z -mx9 | ezpz --max | ezpz -l 11 |",
+        "max_note": "In parentheses: each ezpz size compared with whichever of xz and 7z made the smaller file.",
         "vs": lambda p, rival, smaller: f"{p:.1f}% {'smaller' if smaller else 'larger'} than {rival}",
         "table_cols": "| Method | Original → compressed | Size reduction | Compress time | Extract time | Single file | Peak RAM while compressing / extracting |",
         "reduction": lambda p: f"{p:.1f}% smaller",
@@ -67,7 +71,9 @@ L = {
             "backups": ("Multi-version backup", "The Python 3.11, 3.12, and 3.13 install folders together (158 MB, 3,750 files), standing in for an archive that keeps several versions of one project"),
             "binaries": ("Executables", "231 executables from Linux /usr/bin (105 MB, x86-64)"),
         },
-        "methods": {},
+        "readme_names": {"text": "Wikipedia text (enwik8)", "silesia": "Silesia corpus", "source": "Python install folder",
+                         "backups": "Backup of three Python versions", "binaries": "Linux executables"},
+        "methods": {"ezpz --max (-l 10)": "ezpz --max (-l 10, fast brain)", "ezpz -l 11": "ezpz -l 11 (brain)"},
     },
     "ko": {
         "file": "BENCHMARK.ko.md",
@@ -77,21 +83,22 @@ L = {
         "setup_h": "## 측정 환경",
         "setup": [
             "- 2코어 Intel Xeon 2.1GHz 가상 서버(느린 편), 리눅스. 스레드를 지원하는 도구는 모두 2스레드로 실행했어요 (`zstd -T2`, `xz -T2`, `7z -mmt=2`, `ezpz -j2`).",
-            "- 도구 버전: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.1.0",
+            "- 도구 버전: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.1.0 (`--max` 줄만 0.2.0. 레벨 1~9와 11은 두 버전의 결과가 같아요)",
             "- 각 항목은 한 번씩 측정했어요. 시간은 같은 서버에서 다른 작업이 거의 없을 때 잰 값이지만 몇 % 정도의 오차는 있을 수 있어요.",
             "- 크기는 **원래 크기 → 압축 후 크기** 순서로, MB 단위(1MB = 1,000,000바이트)로 적었어요. 압축 후 크기는 결과 파일 전체(인덱스·목록 포함)예요. **80% 줄어듦**이면 압축 파일이 원래의 5분의 1 크기라는 뜻이에요.",
             "- **파일 하나 꺼내기**: 아카이브 속 작은 파일 1개(예: `json/decoder.py`)를 꺼내는 데 걸린 시간. tar 계열은 구조상 앞에서부터 풀어야 해요.",
             "- **작업 중 최대 메모리**: 압축하거나 푸는 동안 컴퓨터 메모리(RAM)를 가장 많이 쓴 양이에요. 파일 크기가 아니에요.",
             "- ezpz 해제 결과는 매번 원본과 바이트 단위로 비교해 같은지 확인했어요.",
+            "- `--max`는 레벨 10이에요. 빠른 뇌 코덱(코덱 4)에 16 MiB 블록을 써요. `-l 11`은 원래 뇌 코덱(코덱 3)에 64 MiB 블록이에요. `-l 11` 줄은 이 설정을 `--max`라고 부르던 이전 빌드로 쟀는데, 압축된 데이터는 바이트 단위로 같아요.",
         ],
         "summary_h": "## 한눈에: 압축 후 크기 (MB, 작을수록 좋음)",
         "method": "방식",
         "original_row": "**원래 크기 (압축 전)**",
         "best_mark": " 🥇",
         "mb": "MB",
-        "max_h": "### 뇌 코덱(`--max`)을 기존 최고 압축과 비교하면",
-        "max_cols": "| 데이터 | 원래 크기 | ezpz --max | xz -9e | 7z -mx9 | 결과 |",
-        "max_note": "결과 칸은 xz와 7z 중 더 작게 만든 쪽과 비교했어요.",
+        "max_h": "### 뇌 코덱을 기존 최고 압축과 비교하면",
+        "max_cols": "| 데이터 | 원래 크기 | xz -9e | 7z -mx9 | ezpz --max | ezpz -l 11 |",
+        "max_note": "괄호 안은 xz와 7z 중 더 작게 만든 쪽과 비교한 값이에요.",
         "vs": lambda p, rival, smaller: f"{rival}보다 {p:.1f}% {'작음' if smaller else '큼'}",
         "table_cols": "| 방식 | 원래 크기 → 압축 후 | 줄어든 정도 | 압축 시간 | 해제 시간 | 파일 하나 꺼내기 | 작업 중 최대 메모리 (압축할 때 / 풀 때) |",
         "reduction": lambda p: f"{p:.1f}% 줄어듦",
@@ -106,7 +113,10 @@ L = {
             "backups": ("여러 버전 백업", "Python 3.11 · 3.12 · 3.13 설치 폴더 3개를 함께 (158MB, 파일 3,750개). 같은 프로젝트의 여러 버전을 보관하는 상황이에요"),
             "binaries": ("실행 파일", "리눅스 /usr/bin의 실행 파일 231개 (105MB, x86-64)"),
         },
-        "methods": {"ezpz (default -l 7)": "ezpz (기본 -l 7)", "ezpz --max (brain)": "ezpz --max (뇌)"},
+        "readme_names": {"text": "위키백과 텍스트 (enwik8)", "silesia": "Silesia 표준 테스트 세트", "source": "Python 설치 폴더",
+                         "backups": "Python 3개 버전 백업", "binaries": "리눅스 실행 파일"},
+        "methods": {"ezpz (default -l 7)": "ezpz (기본 -l 7)", "ezpz --max (-l 10)": "ezpz --max (-l 10, 빠른 뇌)",
+                    "ezpz -l 11": "ezpz -l 11 (뇌)"},
     },
 }
 
@@ -115,20 +125,22 @@ def mb(b, digits):
     return f"{b / 1e6:.{digits}f}"
 
 
-def max_rows(lang):
-    """Rows of the brain codec vs xz/7z table: sizes in MB plus a worded result."""
+def max_rows(lang, names="names"):
+    """Rows of the brain codecs vs xz/7z table: sizes in MB, and each ezpz size compared
+    with the smaller of xz and 7z."""
     s = L[lang]
     out = []
     for ds in DATASETS:
-        mx = rows[(ds, MAX)]["size"]
         rival_sizes = [(rows[(ds, key)]["size"], short) for key, short in RIVALS]
+        brain_sizes = [rows[(ds, key)]["size"] for key, _ in BRAIN]
         best_size, best_name = min(rival_sizes)
-        smallest = min(mx, best_size)
+        smallest = min(brain_sizes + [best_size])
         cell = lambda b: (f"**{mb(b, 1)}{s['mb']}**" if b == smallest else f"{mb(b, 1)}{s['mb']}")
-        p = abs(mx / best_size - 1) * 100
-        out.append(f"| {s['names'][ds][0]} | {mb(RAW[ds], 1)}{s['mb']} | {cell(mx)} | "
-                   + " | ".join(cell(size) for size, _ in rival_sizes)
-                   + f" | {s['vs'](p, best_name, mx < best_size)} |")
+        vs = lambda b: s["vs"](abs(b / best_size - 1) * 100, best_name, b < best_size)
+        label = s[names][ds] if names == "readme_names" else s[names][ds][0]
+        out.append(f"| {label} | {mb(RAW[ds], 1)}{s['mb']} | "
+                   + " | ".join(cell(size) for size, _ in rival_sizes) + " | "
+                   + " | ".join(f"{cell(b)} ({vs(b)})" for b in brain_sizes) + " |")
     return out
 
 
@@ -187,7 +199,7 @@ if __name__ == "__main__":
     import sys
     if "--readme-rows" in sys.argv:  # rows for the results table in README.md / README.ko.md
         for lang in ("en", "ko"):
-            print("\n".join(max_rows(lang)), end="\n\n")
+            print("\n".join(max_rows(lang, "readme_names")), end="\n\n")
         sys.exit()
     for lang in ("en", "ko"):
         render(lang)

@@ -26,13 +26,13 @@ ln -s /etc/passwd src/deep/escape
 head -c 3000000 /dev/urandom > src/big.bin; cat src/big.bin src/big.bin > src/big2x.bin   # dedup across >2MB
 
 echo "[roundtrip]"
-for lv in 1 6 9 10; do
+for lv in 1 6 9 10 11; do
   rm -rf out; "$B" c a$lv.ezpz src -l $lv >/dev/null 2>&1 && "$B" x a$lv.ezpz -C out >/dev/null 2>&1 \
     && diff -r --no-dereference -x escape src out/src >/dev/null && ok "level $lv" || bad "level $lv"
 done
 rm -rf out; "$B" c nd.ezpz src --no-dedup --no-filter >/dev/null 2>&1 && "$B" x nd.ezpz -C out >/dev/null 2>&1 \
   && diff -r -x escape src out/src >/dev/null && ok "no-dedup/no-filter" || bad "no-dedup/no-filter"
-for c in zstd lzma2 brain store; do
+for c in zstd lzma2 brain brain-fast store; do
   rm -rf out; "$B" c c_$c.ezpz src --codec $c >/dev/null 2>&1 && "$B" x c_$c.ezpz -C out >/dev/null 2>&1 \
     && diff -r -x escape src out/src >/dev/null && ok "codec $c" || bad "codec $c"
 done

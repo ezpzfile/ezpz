@@ -50,8 +50,10 @@ def methods(ds):
          f"{EZ} x {a('l7.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('l7.ezpz')} {{path}} > /dev/null"),
         ("ezpz -l 9", a("l9.ezpz"), f"{EZ} c {a('l9.ezpz')} {ds} -l 9 -j{J}",
          f"{EZ} x {a('l9.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('l9.ezpz')} {{path}} > /dev/null"),
-        ("ezpz --max (brain)", a("max.ezpz"), f"{EZ} c {a('max.ezpz')} {ds} --max -j{J}",
+        ("ezpz --max (-l 10)", a("max.ezpz"), f"{EZ} c {a('max.ezpz')} {ds} --max -j{J}",
          f"{EZ} x {a('max.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('max.ezpz')} {{path}} > /dev/null"),
+        ("ezpz -l 11", a("l11.ezpz"), f"{EZ} c {a('l11.ezpz')} {ds} -l 11 -j{J}",
+         f"{EZ} x {a('l11.ezpz')} -C {{dest}} -j{J} --unsafe-links", f"{EZ} cat {a('l11.ezpz')} {{path}} > /dev/null"),
     ]
 
 def run(cmd, cwd):

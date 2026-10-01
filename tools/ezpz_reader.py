@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Independent clean-room .ezpz reader, written only from SPEC.md (v1.0 draft, round-2 text).
+Codec 4 (brain-fast, §6.5) was added later, also from SPEC.md alone.
 
 usage: reader.py ARCHIVE [--out DIR] [--compare DIR --sub SUB] [--pub HEXFILE]
                  [--password PW] [--brain-impl fast|ref]
@@ -239,20 +240,26 @@ def wrap32(v):
     return ((v + 0x80000000) & M32) - 0x80000000
 
 
-def brain_decode_ref(payload, raw_len):
-    """Straight transcription of §6.4 (round-1 code, unchanged). Slow but easy to audit."""
+def brain_decode_ref(payload, raw_len, codec=3):
+    """Straight transcription of §6.4 (round-1 code). Slow but easy to audit.
+    codec=4 applies the §6.5 changes (brain-fast): models 0..5 only, a 9-entry input vector,
+    mixers A and C only (st = (stA + stC) >> 1), APM1 only."""
+    need(codec in (3, 4), f"brain: codec {codec}")
+    light = codec == 4
     need(len(payload) >= 1, "brain: empty payload")
     tb = payload[0]
     need(16 <= tb <= 25, f"brain: tb={tb} out of range")
     src = payload[1:]
     srclen = len(src)
 
+    nm = 6 if light else 9          # context models: 0..8 (§6.4.5) or 0..5 (§6.5)
+    ni = nm + 3                     # mixer inputs: models, order 0, match, bias (12 or 9)
     tables, shifts = [], []
-    for i in range(9):
+    for i in range(nm):
         bits = min(tb, 18) if i == 0 else tb
         tables.append([0] * (1 << bits))
         shifts.append(32 - (bits - 5))
-    SM = [[0] * 8192 for _ in range(9)]
+    SM = [[0] * 8192 for _ in range(nm)]
     t0 = [0] * 256
     mt = [0] * (1 << (tb - 3))
     mshift = 32 - (tb - 3)
@@ -260,19 +267,19 @@ def brain_decode_ref(payload, raw_len):
     m_len = 0
     m_sm = [0] * 64
     lq = 0
-    WA = [16384] * (256 * 12)
-    WB = [16384] * (256 * 12)
-    WC = [16384] * (256 * 12)
+    WA = [16384] * (256 * ni)
+    WB = None if light else [16384] * (256 * ni)     # §6.5: mixer B does not exist
+    WC = [16384] * (256 * ni)
     row = [squash((j - 16) * 128) * 16 for j in range(33)]
     apm1 = row * 256
-    apm2 = row * 65536
+    apm2 = None if light else row * 65536            # §6.5: APM2 does not exist
 
     c0, nib, bitpos, c4, c8, word, pword = 1, 1, 0, 0, 0, 0, 0
     hist = bytearray()
-    base = [0] * 9
+    base = [0] * nm
 
     def pick_buckets(ctx, c0):
-        for i in range(9):
+        for i in range(nm):
             tbl = tables[i]
             h = hash2((ctx[i] + (i << 28)) & M32, c0)
             L = h >> shifts[i]
@@ -292,11 +299,13 @@ def brain_decode_ref(payload, raw_len):
 
     def make_ctx():
         c1 = c4 & 0xFF
-        return [c1, c4 & 0xFFFF, c4 & 0xFFFFFF, c4,
-                hash2(c4, c8 & 0xFFFF),
-                hash2(c1, 0x5757) if word == 0 else word,
-                hash2(word, (pword + 0x3131) & M32),
-                c4 & 0x00FFFF00, c4 & 0xFF0000FF]
+        ctx = [c1, c4 & 0xFFFF, c4 & 0xFFFFFF, c4,
+               hash2(c4, c8 & 0xFFFF),
+               hash2(c1, 0x5757) if word == 0 else word]
+        if not light:                                # models 6..8 exist in codec 3 only
+            ctx += [hash2(word, (pword + 0x3131) & M32),
+                    c4 & 0x00FFFF00, c4 & 0xFF0000FF]
+        return ctx
 
     x1, x2 = 0, M32
     x = 0
@@ -307,21 +316,21 @@ def brain_decode_ref(payload, raw_len):
 
     pick_buckets(make_ctx(), c0)
     out = bytearray()
-    xs = [0] * 12
-    xs[11] = 256
+    xs = [0] * ni
+    xs[ni - 1] = 256                # bias: x[11] (codec 3) / x[8] (codec 4)
     S = STRETCH
-    idxs = [0] * 9
-    sts = [0] * 9
+    idxs = [0] * nm
+    sts = [0] * nm
 
     while len(out) < raw_len:
-        for i in range(9):
+        for i in range(nm):
             ix = base[i] + nib
             idxs[i] = ix
             s = tables[i][ix] & 0x1FFF
             sts[i] = s
             xs[i] = S[p12(SM[i][s])]
-        xs[9] = S[p12(t0[c0])]
-        xs[10] = 0
+        xs[nm] = S[p12(t0[c0])]     # order 0: x[9] (codec 3) / x[6] (codec 4)
+        xs[nm + 1] = 0              # match: x[10] (codec 3) / x[7] (codec 4)
         mctx = -1
         if m_len > 0:
             pb = hist[m_ptr] | 0x100
@@ -329,17 +338,21 @@ def brain_decode_ref(payload, raw_len):
             if (pb >> sh) == c0:
                 e = (pb >> (sh - 1)) & 1
                 mctx = lq * 2 + e
-                xs[10] = S[p12(m_sm[mctx])]
+                xs[nm + 1] = S[p12(m_sm[mctx])]
         c1 = c4 & 0xFF
         selA = c0
         selB = (0 if mctx < 0 else lq) * 8 + bitpos
         selC = c1
-        stsum = 0
+        if light:
+            mixers = ((WA, selA), (WC, selC))
+        else:
+            mixers = ((WA, selA), (WB, selB), (WC, selC))
+        mst = []
         prs = []
-        for W, sel in ((WA, selA), (WB, selB), (WC, selC)):
-            o = sel * 12
+        for W, sel in mixers:
+            o = sel * ni
             dot = 0
-            for i in range(12):
+            for i in range(ni):
                 dot += xs[i] * W[o + i]
             st = dot >> 16
             if st > 2047:
@@ -347,8 +360,11 @@ def brain_decode_ref(payload, raw_len):
             elif st < -2047:
                 st = -2047
             prs.append(squash(st))
-            stsum += st
-        st = (stsum * 21846) >> 16
+            mst.append(st)
+        if light:
+            st = (mst[0] + mst[1]) >> 1                      # §6.5
+        else:
+            st = ((mst[0] + mst[1] + mst[2]) * 21846) >> 16  # §6.4.7
         pm = squash(st)
         s2 = st + 2048
         lo = s2 >> 7
@@ -356,10 +372,13 @@ def brain_decode_ref(payload, raw_len):
         cx1 = c0 * 33
         idx1 = cx1 + lo + (w >> 6)
         a1 = (apm1[cx1 + lo] * (128 - w) + apm1[cx1 + lo + 1] * w) >> 11
-        cx2 = (c0 | (c1 << 8)) * 33
-        idx2 = cx2 + lo + (w >> 6)
-        a2 = (apm2[cx2 + lo] * (128 - w) + apm2[cx2 + lo + 1] * w) >> 11
-        p = (pm + a1 + 2 * a2 + 2) >> 2
+        if light:
+            p = (pm + 3 * a1 + 2) >> 2                       # §6.5: APM1 only
+        else:
+            cx2 = (c0 | (c1 << 8)) * 33
+            idx2 = cx2 + lo + (w >> 6)
+            a2 = (apm2[cx2 + lo] * (128 - w) + apm2[cx2 + lo + 1] * w) >> 11
+            p = (pm + a1 + 2 * a2 + 2) >> 2
         if p < 1:
             p = 1
         elif p > 4095:
@@ -380,7 +399,7 @@ def brain_decode_ref(payload, raw_len):
             sp += 1
 
         NX = NEXT1 if y else NEXT0
-        for i in range(9):
+        for i in range(nm):
             smi = SM[i]
             s = sts[i]
             smi[s] = cnt_update(smi[s], y, 1023)
@@ -389,14 +408,15 @@ def brain_decode_ref(payload, raw_len):
         t0[c0] = cnt_update(t0[c0], y, 60)
         if mctx >= 0:
             m_sm[mctx] = cnt_update(m_sm[mctx], y, 1023)
-        for W, sel, pr in ((WA, selA, prs[0]), (WB, selB, prs[1]), (WC, selC, prs[2])):
+        for (W, sel), pr in zip(mixers, prs):
             err = ((y << 12) - pr) * 16
-            o = sel * 12
-            for i in range(12):
+            o = sel * ni
+            for i in range(ni):
                 W[o + i] = wrap32(W[o + i] + ((xs[i] * err) >> 16))
         g = (y << 16) + (y << 7) - y - y
         apm1[idx1] += (g - apm1[idx1]) >> 7
-        apm2[idx2] += (g - apm2[idx2]) >> 7
+        if not light:
+            apm2[idx2] += (g - apm2[idx2]) >> 7
         c0 = c0 * 2 + y
         nib = nib * 2 + y
         bitpos += 1
@@ -446,9 +466,11 @@ def brain_decode_ref(payload, raw_len):
     return bytes(out), sp, srclen
 
 
-def brain_decode_fast(payload, raw_len):
+def brain_decode_fast(payload, raw_len, codec=3):
     """Same arithmetic as brain_decode_ref, restructured for CPython speed (list comps, locals).
-    Cross-checked byte-for-byte against brain_decode_ref."""
+    Cross-checked byte-for-byte against brain_decode_ref. codec=4 selects brain-fast (§6.5)."""
+    need(codec in (3, 4), f"brain: codec {codec}")
+    light = codec == 4
     need(len(payload) >= 1, "brain: empty payload")
     tb = payload[0]
     need(16 <= tb <= 25, f"brain: tb={tb} out of range")
@@ -457,28 +479,30 @@ def brain_decode_fast(payload, raw_len):
     if raw_len == 0:
         return b"", 0, n_src
 
+    nm = 6 if light else 9                            # context models (§6.4.5 / §6.5)
+    ni = nm + 3                                       # mixer inputs: 12 (codec 3) or 9 (codec 4)
     tables, shifts = [], []
-    for i in range(9):
+    for i in range(nm):
         bits = min(tb, 18) if i == 0 else tb          # §6.4.5: model 0 capped at 18
         tables.append([0] * (1 << bits))
         shifts.append(32 - (bits - 5))
-    SM = [[0] * 8192 for _ in range(9)]
+    SM = [[0] * 8192 for _ in range(nm)]
     t0 = [0] * 256
     mt = [0] * (1 << (tb - 3))
     mshift = 32 - (tb - 3)
     m_ptr = m_len = lq = 0
     m_sm = [0] * 64
-    WA = [[16384] * 12 for _ in range(256)]
-    WB = [[16384] * 12 for _ in range(256)]
-    WC = [[16384] * 12 for _ in range(256)]
+    WA = [[16384] * ni for _ in range(256)]
+    WB = None if light else [[16384] * ni for _ in range(256)]   # §6.5: no mixer B
+    WC = [[16384] * ni for _ in range(256)]
     row = [squash((j - 16) * 128) * 16 for j in range(33)]
     apm1 = row * 256
-    apm2 = row * 65536
+    apm2 = None if light else row * 65536                         # §6.5: no APM2
     S = STRETCH
     SQ = SQTAB
     RC = RECIP
     Z16 = [0] * 16
-    zipped_ts = list(zip(range(9), tables, shifts))
+    zipped_ts = list(zip(range(nm), tables, shifts))
 
     def pick(ctx, c0, base):
         for i, tbl, sh in zipped_ts:
@@ -498,8 +522,10 @@ def brain_decode_fast(payload, raw_len):
     c0 = nib = 1
     bitpos = c4 = c8 = word = pword = 0
     out = bytearray()          # == hist
-    base = [0] * 9
-    ctx = [0, 0, 0, 0, hash2(0, 0), hash2(0, 0x5757), hash2(0, 0x3131), 0, 0]
+    base = [0] * nm
+    ctx = [0, 0, 0, 0, hash2(0, 0), hash2(0, 0x5757)]
+    if not light:
+        ctx += [hash2(0, 0x3131), 0, 0]
     pick(ctx, 1, base)
 
     x1, x2 = 0, M32
@@ -520,30 +546,36 @@ def brain_decode_fast(payload, raw_len):
             if (pb >> sh) == c0:
                 mctx = lq * 2 + ((pb >> (sh - 1)) & 1)
                 x10 = S[((m_sm[mctx] >> 10) ^ 0x200000) >> 10]
-        xs.append(x10)
+        xs.append(x10)             # match input: x[10] (codec 3) / x[7] (codec 4)
         xs.append(256)
         c1 = c4 & 0xFF
         wa = WA[c0]
-        wb = WB[(lq if mctx >= 0 else 0) * 8 + bitpos]
         wc = WC[c1]
         sa = sum(map(mul, xs, wa)) >> 16
         sa = 2047 if sa > 2047 else (-2047 if sa < -2047 else sa)
-        sb = sum(map(mul, xs, wb)) >> 16
-        sb = 2047 if sb > 2047 else (-2047 if sb < -2047 else sb)
         sc = sum(map(mul, xs, wc)) >> 16
         sc = 2047 if sc > 2047 else (-2047 if sc < -2047 else sc)
-        st = ((sa + sb + sc) * 21846) >> 16
+        if light:
+            st = (sa + sc) >> 1                       # §6.5: mixers A and C only
+        else:
+            wb = WB[(lq if mctx >= 0 else 0) * 8 + bitpos]
+            sb = sum(map(mul, xs, wb)) >> 16
+            sb = 2047 if sb > 2047 else (-2047 if sb < -2047 else sb)
+            st = ((sa + sb + sc) * 21846) >> 16
         s2 = st + 2048
         pm = SQ[s2]
         lo = s2 >> 7
         w = s2 & 127
         wn = 128 - w
         k1 = c0 * 33 + lo
-        k2 = (c0 | (c1 << 8)) * 33 + lo
         a1 = (apm1[k1] * wn + apm1[k1 + 1] * w) >> 11
-        a2 = (apm2[k2] * wn + apm2[k2 + 1] * w) >> 11
         j = w >> 6
-        p = (pm + a1 + 2 * a2 + 2) >> 2
+        if light:
+            p = (pm + 3 * a1 + 2) >> 2                # §6.5: APM1 only
+        else:
+            k2 = (c0 | (c1 << 8)) * 33 + lo
+            a2 = (apm2[k2] * wn + apm2[k2 + 1] * w) >> 11
+            p = (pm + a1 + 2 * a2 + 2) >> 2
         p = 1 if p < 1 else (4095 if p > 4095 else p)
 
         # ---- arithmetic decode (§6.4.10)
@@ -609,18 +641,20 @@ def brain_decode_fast(payload, raw_len):
         wa[:] = [v + ((xi * e) >> 16) for v, xi in zip(wa, xs)]
         if max(wa) > I32MAX or min(wa) < I32MIN:
             wa[:] = [wrap32(v) for v in wa]
-        e = (yy - SQ[sb + 2048]) * 16
-        wb[:] = [v + ((xi * e) >> 16) for v, xi in zip(wb, xs)]
-        if max(wb) > I32MAX or min(wb) < I32MIN:
-            wb[:] = [wrap32(v) for v in wb]
+        if not light:
+            e = (yy - SQ[sb + 2048]) * 16
+            wb[:] = [v + ((xi * e) >> 16) for v, xi in zip(wb, xs)]
+            if max(wb) > I32MAX or min(wb) < I32MIN:
+                wb[:] = [wrap32(v) for v in wb]
         e = (yy - SQ[sc + 2048]) * 16
         wc[:] = [v + ((xi * e) >> 16) for v, xi in zip(wc, xs)]
         if max(wc) > I32MAX or min(wc) < I32MIN:
             wc[:] = [wrap32(v) for v in wc]
         k1 += j
-        k2 += j
         apm1[k1] += (g - apm1[k1]) >> 7
-        apm2[k2] += (g - apm2[k2]) >> 7
+        if not light:
+            k2 += j
+            apm2[k2] += (g - apm2[k2]) >> 7
         c0 = c0 * 2 + y
         nib = nib * 2 + y
         bitpos += 1
@@ -671,9 +705,10 @@ def brain_decode_fast(payload, raw_len):
             c1 = c4 & 0xFF
             ctx = [c1, c4 & 0xFFFF, c4 & 0xFFFFFF, c4,
                    hash2(c4, c8 & 0xFFFF),
-                   hash2(c1, 0x5757) if word == 0 else word,
-                   hash2(word, (pword + 0x3131) & M32),
-                   c4 & 0x00FFFF00, c4 & 0xFF0000FF]
+                   hash2(c1, 0x5757) if word == 0 else word]
+            if not light:                             # §6.5: only ctx_0..ctx_5 in codec 4
+                ctx += [hash2(word, (pword + 0x3131) & M32),
+                        c4 & 0x00FFFF00, c4 & 0xFF0000FF]
             pick(ctx, 1, base)
         elif bitpos == 4:
             nib = 1
@@ -718,11 +753,12 @@ def decompress(codec, payload, raw_len, what, index=False):
         need(len(out) == raw_len, f"{what}: lzma2 output length mismatch")
         log(f"    lzma2: prop={pbyte} dict={dsz} bytes")
         return out
-    if codec == 3:
-        out, used, avail = BRAIN_IMPL[OPTS["brain"]](payload, raw_len)
-        log(f"    brain[{OPTS['brain']}]: tb={payload[0]} consumed {min(used, avail)}/{avail} AC bytes "
+    if codec in (3, 4):             # brain (§6.4) / brain-fast (§6.5); data blocks only
+        name = "brain" if codec == 3 else "brain-fast"
+        out, used, avail = BRAIN_IMPL[OPTS["brain"]](payload, raw_len, codec)
+        log(f"    {name}[{OPTS['brain']}]: tb={payload[0]} consumed {min(used, avail)}/{avail} AC bytes "
             f"(+{max(0, used - avail)} implicit zero bytes)")
-        need(len(out) == raw_len, f"{what}: brain length mismatch")
+        need(len(out) == raw_len, f"{what}: {name} length mismatch")
         return out
     raise FormatError(f"{what}: unknown codec {codec}")
 

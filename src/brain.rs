@@ -1,4 +1,6 @@
-//! "Brain" codec (codec id 3) - predictive coding with online learning.
+//! "Brain" codecs - predictive coding with online learning.
+//! Codec id 3 (brain) runs the full set of models; codec id 4 (brain-fast)
+//! runs a smaller set that is about 30% faster and a few percent larger.
 //!
 //! Idea in plain words:
 //!   * Like the brain's *predictive coding*, we only spend bits on surprise:
@@ -15,13 +17,22 @@
 //!     has to be stored in the file.
 //!
 //! Everything is integer arithmetic so every machine produces identical bits.
-//! The exact algorithm is normative - see SPEC.md §6.4.
+//! The exact algorithm is normative - see SPEC.md §6.4 (brain) and §6.5 (brain-fast).
 
 use anyhow::{Result, ensure};
 use std::sync::OnceLock;
 
 pub const MIN_TABLE_BITS: u8 = 16;
 pub const MAX_TABLE_BITS: u8 = 25;
+
+/// Which set of models runs. Each profile is its own codec id in the archive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// Codec 3: nine context models, three mixers, two APM stages.
+    Full,
+    /// Codec 4: the first six context models, two mixers, one APM stage.
+    Fast,
+}
 
 // ------------------------------------------------------------ squash/stretch
 
@@ -201,13 +212,14 @@ impl HashTable {
 
 // ------------------------------------------------------------ neurons (mixers)
 
-const N_HASHED: usize = 9;
-const NIN: usize = N_HASHED + 3; // + order-0, match, bias
-const N_MIX: usize = 3;
+/// Most hashed context models any profile uses (the full profile).
+const MAX_HASHED: usize = 9;
+/// Most mixer inputs: the hashed models + order-0, match, bias.
+const MAX_NIN: usize = MAX_HASHED + 3;
 const MIXER_LR: i32 = 16;
 
 struct Mixer {
-    w: Vec<[i32; NIN]>,
+    w: Vec<[i32; MAX_NIN]>,
     sel: usize,
     pr: i32,
 }
@@ -215,28 +227,29 @@ struct Mixer {
 impl Mixer {
     fn new(sets: usize) -> Self {
         Mixer {
-            w: vec![[1 << 14; NIN]; sets],
+            w: vec![[1 << 14; MAX_NIN]; sets],
             sel: 0,
             pr: 2048,
         }
     }
-    #[inline]
-    fn mix(&mut self, x: &[i32; NIN], sel: usize) -> i32 {
+    /// Uses the first `nin` inputs and weights only.
+    #[inline(always)]
+    fn mix(&mut self, x: &[i32; MAX_NIN], sel: usize, nin: usize) -> i32 {
         self.sel = sel;
         let w = &self.w[sel];
         let mut dot: i64 = 0;
-        for i in 0..NIN {
+        for i in 0..nin {
             dot += x[i] as i64 * w[i] as i64;
         }
         let st = (dot >> 16).clamp(-2047, 2047) as i32;
         self.pr = squash(st);
         st
     }
-    #[inline]
-    fn update(&mut self, x: &[i32; NIN], y: i32) {
+    #[inline(always)]
+    fn update(&mut self, x: &[i32; MAX_NIN], y: i32, nin: usize) {
         let err = ((y << 12) - self.pr) * MIXER_LR;
         let w = &mut self.w[self.sel];
-        for i in 0..NIN {
+        for i in 0..nin {
             w[i] = w[i].wrapping_add((x[i] * err) >> 16);
         }
     }
@@ -282,15 +295,16 @@ impl Apm {
 const MATCH_MIN: usize = 6;
 const MATCH_KEEP: usize = 16;
 
-pub struct Predictor {
+/// `FAST = false` is codec 3 (brain), `FAST = true` is codec 4 (brain-fast).
+pub struct Predictor<const FAST: bool> {
     st: &'static [i16; 4096],
     rc: &'static [u32; 1024],
     t0: Vec<u32>,
     tables: Vec<HashTable>,
     sm: Vec<Vec<u32>>,
-    ctx: [u32; N_HASHED],
-    base: [usize; N_HASHED],
-    state: [u16; N_HASHED],
+    ctx: [u32; MAX_HASHED],
+    base: [usize; MAX_HASHED],
+    state: [u16; MAX_HASHED],
     // match model
     hist: Vec<u8>,
     mt: Vec<u32>,
@@ -302,8 +316,8 @@ pub struct Predictor {
     m_lq: usize,
     mix: Vec<Mixer>,
     apm1: Apm,
-    apm2: Apm,
-    x: [i32; NIN],
+    apm2: Apm, // empty in the fast profile
+    x: [i32; MAX_NIN],
     c0: u32,
     nib: u32,
     bitpos: u32,
@@ -314,11 +328,17 @@ pub struct Predictor {
     pr: i32,
 }
 
-impl Predictor {
+impl<const FAST: bool> Predictor<FAST> {
+    /// Hashed context models: 0..=8 in the full profile, 0..=5 in the fast one.
+    const N_HASHED: usize = if FAST { 6 } else { 9 };
+    /// Mixer inputs: the hashed models, then order-0, match, bias.
+    const NIN: usize = Self::N_HASHED + 3;
+    const N_MIX: usize = if FAST { 2 } else { 3 };
+
     pub fn new(table_bits: u8, expected_len: usize) -> Self {
         let tb = table_bits;
-        let mut tables = Vec::with_capacity(N_HASHED);
-        for i in 0..N_HASHED {
+        let mut tables = Vec::with_capacity(Self::N_HASHED);
+        for i in 0..Self::N_HASHED {
             let bits = if i == 0 { tb.min(18) } else { tb };
             tables.push(HashTable::new(bits));
         }
@@ -328,10 +348,10 @@ impl Predictor {
             rc: recip(),
             t0: vec![0u32; 256],
             tables,
-            sm: vec![vec![0u32; N_STATES]; N_HASHED],
-            ctx: [0; N_HASHED],
-            base: [0; N_HASHED],
-            state: [0; N_HASHED],
+            sm: vec![vec![0u32; N_STATES]; Self::N_HASHED],
+            ctx: [0; MAX_HASHED],
+            base: [0; MAX_HASHED],
+            state: [0; MAX_HASHED],
             hist: Vec::with_capacity(expected_len),
             mt: vec![0u32; 1usize << mbits],
             mt_shift: 32 - mbits,
@@ -340,10 +360,10 @@ impl Predictor {
             m_sm: [0; 64],
             m_ctx: 0,
             m_lq: 0,
-            mix: (0..N_MIX).map(|_| Mixer::new(256)).collect(),
+            mix: (0..Self::N_MIX).map(|_| Mixer::new(256)).collect(),
             apm1: Apm::new(256),
-            apm2: Apm::new(65536),
-            x: [0; NIN],
+            apm2: Apm::new(if FAST { 0 } else { 65536 }),
+            x: [0; MAX_NIN],
             c0: 1,
             nib: 1,
             bitpos: 0,
@@ -376,23 +396,25 @@ impl Predictor {
         } else {
             self.word
         };
-        self.ctx[6] = hash2(self.word, self.pword.wrapping_add(0x3131));
-        self.ctx[7] = c4 & 0x00FF_FF00;
-        self.ctx[8] = c4 & 0xFF00_00FF;
+        if !FAST {
+            self.ctx[6] = hash2(self.word, self.pword.wrapping_add(0x3131));
+            self.ctx[7] = c4 & 0x00FF_FF00;
+            self.ctx[8] = c4 & 0xFF00_00FF;
+        }
     }
 
     fn select_buckets(&mut self) {
         // Compute all hashes and touch all lines first so the memory loads overlap.
-        let mut hs = [0u32; N_HASHED];
+        let mut hs = [0u32; MAX_HASHED];
         let mut touch = 0u16;
-        for i in 0..N_HASHED {
+        for i in 0..Self::N_HASHED {
             let h = hash2(self.ctx[i].wrapping_add((i as u32) << 28), self.c0);
             hs[i] = h;
             let t = &self.tables[i];
             touch ^= t.get(((h >> t.shift) as usize) << 5);
         }
         std::hint::black_box(touch);
-        for i in 0..N_HASHED {
+        for i in 0..Self::N_HASHED {
             self.base[i] = self.tables[i].find(hs[i]);
         }
     }
@@ -444,16 +466,17 @@ impl Predictor {
     /// Probability (1..4095, of 4096) that the next bit is 1.
     #[inline]
     pub fn p(&mut self) -> i32 {
+        let nh = Self::N_HASHED;
         let nib = self.nib as usize;
-        for i in 0..N_HASHED {
+        for i in 0..nh {
             let s = self.tables[i].get(self.base[i] + nib) & (N_STATES as u16 - 1);
             self.state[i] = s;
             let v = unsafe { *self.sm.get_unchecked(i).get_unchecked(s as usize) };
             self.x[i] = self.stretch(slot_p12(v));
         }
-        self.x[N_HASHED] = self.stretch(slot_p12(self.t0[self.c0 as usize]));
+        self.x[nh] = self.stretch(slot_p12(self.t0[self.c0 as usize]));
         self.m_ctx = 0;
-        self.x[N_HASHED + 1] = 0;
+        self.x[nh + 1] = 0;
         if self.m_len > 0 {
             let pb = self.hist[self.m_ptr] as u32 | 0x100;
             let shift = 8 - self.bitpos;
@@ -461,27 +484,29 @@ impl Predictor {
                 let bit = ((pb >> (shift - 1)) & 1) as usize;
                 let cx = self.m_lq * 2 + bit;
                 self.m_ctx = 1 + cx;
-                self.x[N_HASHED + 1] = self.stretch(slot_p12(self.m_sm[cx]));
+                self.x[nh + 1] = self.stretch(slot_p12(self.m_sm[cx]));
             }
         }
-        self.x[N_HASHED + 2] = 256;
+        self.x[nh + 2] = 256;
 
-        let lq = if self.m_ctx == 0 { 0 } else { self.m_lq };
-        let sels = [
-            self.c0 as usize,
-            lq * 8 + self.bitpos as usize,
-            (self.c4 & 0xFF) as usize,
-        ];
-        let mut sum = 0i32;
-        for k in 0..N_MIX {
-            sum += self.mix[k].mix(&self.x, sels[k]);
-        }
-        let st = (sum * 21846) >> 16; // average of 3
+        let c0 = self.c0 as usize;
+        let c1 = (self.c4 & 0xFF) as usize;
+        let st = if FAST {
+            // Mixers A (by bit position in the byte) and C (by previous byte).
+            let sum = self.mix[0].mix(&self.x, c0, Self::NIN) + self.mix[1].mix(&self.x, c1, Self::NIN);
+            sum >> 1 // average of 2
+        } else {
+            let lq = if self.m_ctx == 0 { 0 } else { self.m_lq };
+            let sels = [c0, lq * 8 + self.bitpos as usize, c1];
+            let mut sum = 0i32;
+            for k in 0..3 {
+                sum += self.mix[k].mix(&self.x, sels[k], Self::NIN);
+            }
+            (sum * 21846) >> 16 // average of 3
+        };
         let pm = squash(st);
-        let a1 = self.apm1.pp(st, self.c0 as usize);
-        let a2 = self
-            .apm2
-            .pp(st, (self.c0 | ((self.c4 & 0xFF) << 8)) as usize);
+        let a1 = self.apm1.pp(st, c0);
+        let a2 = if FAST { a1 } else { self.apm2.pp(st, c0 | (c1 << 8)) };
         self.pr = ((pm + a1 + 2 * a2 + 2) >> 2).clamp(1, 4095);
         self.pr
     }
@@ -490,7 +515,7 @@ impl Predictor {
     pub fn update(&mut self, y: i32) {
         let rc = self.rc;
         let nib = self.nib as usize;
-        for i in 0..N_HASHED {
+        for i in 0..Self::N_HASHED {
             let s = self.state[i];
             let sm = unsafe { self.sm.get_unchecked_mut(i).get_unchecked_mut(s as usize) };
             slot_update(sm, y, LIMIT_SM, rc);
@@ -502,11 +527,13 @@ impl Predictor {
         if self.m_ctx != 0 {
             slot_update(&mut self.m_sm[self.m_ctx - 1], y, LIMIT_MATCH, rc);
         }
-        for k in 0..N_MIX {
-            self.mix[k].update(&self.x, y);
+        for k in 0..Self::N_MIX {
+            self.mix[k].update(&self.x, y, Self::NIN);
         }
         self.apm1.update(y);
-        self.apm2.update(y);
+        if !FAST {
+            self.apm2.update(y);
+        }
 
         self.c0 = (self.c0 << 1) | y as u32;
         self.nib = (self.nib << 1) | y as u32;
@@ -625,11 +652,25 @@ pub fn table_bits_for(n: usize) -> u8 {
     (b + 1).clamp(MIN_TABLE_BITS, 24)
 }
 
-pub fn compress(raw: &[u8]) -> Vec<u8> {
+pub fn compress(raw: &[u8], profile: Profile) -> Vec<u8> {
+    match profile {
+        Profile::Full => compress_with::<false>(raw),
+        Profile::Fast => compress_with::<true>(raw),
+    }
+}
+
+pub fn decompress(stored: &[u8], raw_len: usize, profile: Profile) -> Result<Vec<u8>> {
+    match profile {
+        Profile::Full => decompress_with::<false>(stored, raw_len),
+        Profile::Fast => decompress_with::<true>(stored, raw_len),
+    }
+}
+
+fn compress_with<const FAST: bool>(raw: &[u8]) -> Vec<u8> {
     let tb = table_bits_for(raw.len());
     let mut out = Vec::with_capacity(raw.len() / 3 + 16);
     out.push(tb);
-    let mut p = Predictor::new(tb, raw.len());
+    let mut p = Predictor::<FAST>::new(tb, raw.len());
     let mut e = Encoder {
         x1: 0,
         x2: u32::MAX,
@@ -645,14 +686,14 @@ pub fn compress(raw: &[u8]) -> Vec<u8> {
     e.finish()
 }
 
-pub fn decompress(stored: &[u8], raw_len: usize) -> Result<Vec<u8>> {
+fn decompress_with<const FAST: bool>(stored: &[u8], raw_len: usize) -> Result<Vec<u8>> {
     ensure!(!stored.is_empty(), "empty brain block");
     let tb = stored[0];
     ensure!(
         (MIN_TABLE_BITS..=MAX_TABLE_BITS).contains(&tb),
         "brain table size out of range"
     );
-    let mut p = Predictor::new(tb, raw_len);
+    let mut p = Predictor::<FAST>::new(tb, raw_len);
     let mut d = Decoder::new(&stored[1..]);
     let mut out = Vec::with_capacity(raw_len);
     for _ in 0..raw_len {
@@ -679,12 +720,17 @@ mod tests {
             );
         }
         data.extend((0..5000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8));
-        let c = compress(&data);
-        assert!(c.len() < data.len() / 4);
-        assert_eq!(decompress(&c, data.len()).unwrap(), data);
-        for n in [0usize, 1, 2, 7, 100] {
-            let d: Vec<u8> = (0..n as u8).collect();
-            assert_eq!(decompress(&compress(&d), n).unwrap(), d);
+        for profile in [Profile::Full, Profile::Fast] {
+            let c = compress(&data, profile);
+            assert!(c.len() < data.len() / 4);
+            assert_eq!(decompress(&c, data.len(), profile).unwrap(), data);
+            for n in [0usize, 1, 2, 7, 100] {
+                let d: Vec<u8> = (0..n as u8).collect();
+                assert_eq!(decompress(&compress(&d, profile), n, profile).unwrap(), d);
+            }
         }
+        // The two profiles are different codecs: they must not decode each other's output.
+        let c = compress(&data, Profile::Fast);
+        assert_ne!(decompress(&c, data.len(), Profile::Full).unwrap(), data);
     }
 }

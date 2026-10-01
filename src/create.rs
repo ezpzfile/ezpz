@@ -1,6 +1,7 @@
 //! Archive writer.
 
 use crate::classify::{self, Class};
+use crate::brain::Profile;
 use crate::codec::{self, Plan};
 use crate::format::*;
 use crate::index::*;
@@ -26,6 +27,7 @@ pub enum CodecChoice {
     Zstd,
     Lzma2,
     Brain,
+    BrainFast,
     Store,
 }
 
@@ -52,11 +54,15 @@ pub struct Stats {
     pub dedup_bytes: u64,
     pub archive_bytes: u64,
     pub blocks: u64,
-    pub codec_blocks: [u64; 4],
+    pub codec_blocks: [u64; 5],
     pub seconds: f64,
 }
 
-/// (plan, block size) for a level. 10 = "max" (brain codec).
+pub const MAX_LEVEL: u8 = 11;
+
+/// (plan, block size) for a level.
+/// 10 = `--max`: fast brain codec with 16 MiB blocks, so several cores work at once.
+/// 11 = smallest: full brain codec with 64 MiB blocks (slowest).
 pub fn level_params(level: u8, choice: CodecChoice) -> (Plan, usize) {
     let mib = |n: usize| n << 20;
     let (zl, lz, bs) = match level {
@@ -69,17 +75,20 @@ pub fn level_params(level: u8, choice: CodecChoice) -> (Plan, usize) {
         7 => (19, 8, mib(32)),
         8 => (22, 9, mib(64)),
         9 => (22, 9 | liblzma::stream::PRESET_EXTREME, mib(64)),
+        10 => (22, 9 | liblzma::stream::PRESET_EXTREME, mib(16)),
         _ => (22, 9 | liblzma::stream::PRESET_EXTREME, mib(64)),
     };
     let plan = match choice {
         CodecChoice::Store => Plan::Store,
         CodecChoice::Zstd => Plan::Zstd(zl),
         CodecChoice::Lzma2 => Plan::Lzma2(lz),
-        CodecChoice::Brain => Plan::Brain,
+        CodecChoice::Brain => Plan::Brain(Profile::Full),
+        CodecChoice::BrainFast => Plan::Brain(Profile::Fast),
         CodecChoice::Auto => match level {
             0..=8 => Plan::Zstd(zl),
             9 => Plan::Auto { zstd: zl, lzma: lz },
-            _ => Plan::Brain,
+            10 => Plan::Brain(Profile::Fast),
+            _ => Plan::Brain(Profile::Full),
         },
     };
     (plan, bs)
@@ -497,10 +506,10 @@ fn write_body(
     let threads = o.threads.max(1);
     let (tx, rx) = mpsc::sync_channel::<RawBlock>(threads * 2);
     let header_len = header.bytes.len() as u64;
-    let worker = std::thread::spawn(move || -> Result<(BufWriter<File>, Vec<BlockEntry>, Vec<Vec<u32>>, [u64; 4], u64)> {
+    let worker = std::thread::spawn(move || -> Result<(BufWriter<File>, Vec<BlockEntry>, Vec<Vec<u32>>, [u64; 5], u64)> {
         let mut entries = Vec::new();
         let mut lens_all = Vec::new();
-        let mut counts = [0u64; 4];
+        let mut counts = [0u64; 5];
         let mut offset = header_len;
         let mut done = false;
         while !done {
@@ -522,7 +531,7 @@ fn write_body(
                 let s = s?;
                 w.write_all(&s.frame)?;
                 offset += s.frame.len() as u64;
-                counts[s.codec.min(3) as usize] += 1;
+                counts[s.codec.min(4) as usize] += 1;
                 entries.push(s.entry);
                 lens_all.push(b.lens);
             }

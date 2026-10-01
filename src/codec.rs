@@ -1,4 +1,4 @@
-//! Block codecs: store, zstd, LZMA2 (raw), brain (SPEC.md §6).
+//! Block codecs: store, zstd, LZMA2 (raw), brain, brain-fast (SPEC.md §6).
 
 use crate::format::*;
 use anyhow::{Result, bail, ensure};
@@ -14,7 +14,7 @@ pub enum Plan {
         zstd: i32,
         lzma: u32,
     },
-    Brain,
+    Brain(crate::brain::Profile),
 }
 
 pub fn compress(raw: &[u8], plan: Plan) -> Result<(u8, Vec<u8>)> {
@@ -31,7 +31,13 @@ pub fn compress(raw: &[u8], plan: Plan) -> Result<(u8, Vec<u8>)> {
                 (CODEC_ZSTD, a)
             }
         }
-        Plan::Brain => (CODEC_BRAIN, crate::brain::compress(raw)),
+        Plan::Brain(profile) => (
+            match profile {
+                crate::brain::Profile::Full => CODEC_BRAIN,
+                crate::brain::Profile::Fast => CODEC_BRAIN_FAST,
+            },
+            crate::brain::compress(raw, profile),
+        ),
     };
     if out.len() >= raw.len() {
         Ok((CODEC_STORE, raw.to_vec()))
@@ -48,7 +54,8 @@ pub fn decompress(codec: u8, stored: &[u8], raw_len: usize) -> Result<Vec<u8>> {
         }
         CODEC_ZSTD => zstd_decompress(stored, raw_len)?,
         CODEC_LZMA2 => lzma2_decompress(stored, raw_len)?,
-        CODEC_BRAIN => crate::brain::decompress(stored, raw_len)?,
+        CODEC_BRAIN => crate::brain::decompress(stored, raw_len, crate::brain::Profile::Full)?,
+        CODEC_BRAIN_FAST => crate::brain::decompress(stored, raw_len, crate::brain::Profile::Fast)?,
         c => bail!("unknown codec {c} (archive made by a newer version?)"),
     };
     ensure!(out.len() == raw_len, "decompressed size mismatch");

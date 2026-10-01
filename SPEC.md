@@ -5,7 +5,7 @@ English | [한국어](SPEC.ko.md)
 - File extension: `.ezpz`
 - Media type (proposed): `application/x-ezpz`
 - Status: draft. The reference implementation is `ezpz` (Rust) in this repository.
-- Date: 2026-10-01
+- Date: 2026-10-02
 
 ---
 
@@ -24,7 +24,7 @@ English | [한국어](SPEC.ko.md)
 | Encryption that also hides file names | ✗ | ✓ | ✗ | ✓ |
 | Damage check on an encrypted archive without the password (tamper check too when signed) | ✗ | ✗ | ✗ | ✓ |
 | Digital signature (proof that a key holder approved this content) | ✗ | ✗ | ✗ | ✓ (Ed25519) |
-| Prediction codec that learns as it runs | ✗ | ✗ | ✗ | ✓ (brain codec, maximum compression mode) |
+| Prediction codec that learns as it runs | ✗ | ✗ | ✗ | ✓ (brain codecs, for maximum compression) |
 
 ¹ Repeated content shrinks only when it falls inside the compressor's memory (its dictionary or window, typically tens to hundreds of MiB).
 
@@ -33,14 +33,14 @@ English | [한국어](SPEC.ko.md)
 - **Blocks.** Files are sorted so that similar ones sit next to each other, joined end to end, and cut into blocks of a fixed size (for example 32 MiB) that are compressed separately. Joining them lets the compressor use similarities between files (solid compression). Cutting them into blocks means that extracting one file only requires decompressing the blocks that contain it.
 - **Deduplication.** File contents are split at boundaries chosen by the content itself, so identical content becomes identical chunks wherever it appears, and each chunk is stored once. This pays off most when an archive holds several versions of the same project.
 - **Integrity chain.** The trailer at the end holds a hash of the header and the index, and the index holds a hash of every block, so accidental damage to even one byte is always detected. Anyone can recompute these hashes, though. Detecting deliberate changes needs a signature, or a copy of the hash kept somewhere trusted. The signature sits at the top of the chain.
-- **Brain codec.** It predicts each bit before coding it and stores only how far the prediction was off. Several small predictors each give an estimate, and a small neural network learns, as it goes, which of them to trust in the current situation. The compressor and the decompressor learn in exactly the same way, like twins, so the learned model never has to be stored in the file.
+- **Brain codec.** It predicts each bit before coding it and stores only how far the prediction was off. Several small predictors each give an estimate, and a small neural network learns, as it goes, which of them to trust in the current situation. The compressor and the decompressor learn in exactly the same way, like twins, so the learned model never has to be stored in the file. A lighter version, brain-fast, runs fewer predictors: it is 1.2 to 2 times as fast, depending on the processor, and its output is 1.5 to 8% larger, depending on the data.
 
 ---
 
 ## 1. Conventions
 
 - **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as defined in RFC 2119.
-- All fixed-size integers are little-endian. One exception: the brain codec's arithmetic-coded bit stream is read and written most significant byte first (big-endian), see §6.4.10.
+- All fixed-size integers are little-endian. One exception: the arithmetic-coded bit stream of the brain codecs (codecs 3 and 4) is read and written most significant byte first (big-endian), see §6.4.10.
 - `u8/u16/u32/u64` are unsigned integers; `i32/i64` are two's-complement signed integers.
 - `>>` on signed values is an arithmetic shift (it rounds down). `/` is integer division that truncates toward zero.
 - **varint**: unsigned LEB128, at most 64 bits and at most 10 bytes. Seven bits per byte, low bits first, with the high bit set when more bytes follow. Encoders MUST write the shortest form. Decoders MUST reject non-minimal forms (a varint that ends in an unnecessary 0x00 byte) and values above 64 bits, so that every decoder judges a given file the same way.
@@ -145,7 +145,8 @@ Data blocks, the block table, and the catalog all start with the same 16-byte fr
 | 1 | zstd | One or more RFC 8878 Zstandard frames |
 | 2 | lzma2 | A dictionary-size property byte followed by a raw LZMA2 stream |
 | 3 | brain | A table-size byte followed by an arithmetic-coded bit stream (§6.4) |
-| 4-255 | reserved | Unknown codecs MUST be treated as an error |
+| 4 | brain-fast | Same layout as brain, coded with fewer models (§6.5) |
+| 5-255 | reserved | Unknown codecs MUST be treated as an error |
 
 Encoders SHOULD store a block with codec 0 when compression does not make it smaller.
 
@@ -434,6 +435,41 @@ decode: x = the first 4 bytes (big-endian); reading past the end of the input yi
 
 Decoding stops after exactly raw_len bytes. Any remaining input is ignored (the block hash guarantees integrity).
 
+### 6.5 brain-fast (codec 4)
+
+brain-fast is the brain codec with fewer models. Depending on the processor it runs 1.2 to 2 times as fast as codec 3, and its output is 1.5 to 8% larger: the least on plain text, the most on program files. Everything in §6.4 applies, with the changes below.
+
+- **Payload layout** (§6.4.1): unchanged, including the rule 16 ≤ tb ≤ 25. Memory use (informative): about `10 × 2^tb + 2^(tb-1) + raw_len + 1 MiB` bytes, roughly 185 MiB for tb = 24 with a 16 MiB block.
+- **Context models** (§6.4.5): only models 0 to 5 (order 1, order 2, order 3, order 4, order 6, word). Models 6, 7, and 8 do not exist, so there are six hash tables and six state maps. Table sizes follow §6.4.5: model 0 uses `bits = min(tb, 18)` and models 1 to 5 use `bits = tb`. At every byte boundary only ctx_0 to ctx_5 are computed, and bucket selection runs over i = 0..5 with the same formula.
+- **Input vector** (§6.4.7): x has 9 entries.
+
+  ```
+  x[i] = stretch(p12(SM_i[s_i]))       i = 0..5
+  x[6] = stretch(p12(t0[c0]))
+  x[7] = the match model input, computed exactly like x[10] in §6.4.7 (0 when mctx is none)
+  x[8] = 256                           # bias
+  ```
+
+  mctx is set exactly as in §6.4.7, and learning step 3 still updates `m_sm[mctx]`.
+
+- **Mixers**: two mixers, A and C, each with 256 weight sets of 9 i32 weights, all initialized to `16384`. Mixer B does not exist. `mix` is the function from §6.4.7 with the sum taken over i = 0..8.
+
+  ```
+  st = (mix(A, c0) + mix(C, c1)) >> 1   # arithmetic shift; st stays in -2047 ..= 2047
+  pm = squash(st)
+  ```
+
+- **APM**: only APM1. APM2 does not exist.
+
+  ```
+  a1 = pp(APM1(256), st, c0)
+  p  = clamp((pm + 3*a1 + 2) >> 2, 1, 4095)
+  ```
+
+- **Learning** (§6.4.8): step 1 runs for i = 0..5, step 4 updates mixers A and C over i = 0..8, and step 5 updates APM1 only. Steps 2, 3, 6, and 7 are unchanged.
+
+The counters and bit histories (§6.4.3), the match model (§6.4.6), byte boundary processing (§6.4.9), and the arithmetic coder (§6.4.10) are the same as in codec 3.
+
 ## 7. Block table (`EZBT`, always plaintext)
 
 The decoded frame payload is laid out as follows. Values are grouped by column so that they compress well.
@@ -645,14 +681,15 @@ Decoders do not need anything in this section. It describes how the reference en
 | **7 (default)** | zstd 19 (+LDM) | 32 MiB |
 | 8 | zstd 22 | 64 MiB |
 | 9 | tries zstd 22 and LZMA2 9e, keeps the smaller | 64 MiB |
-| 10 (`--max`) | brain codec | 64 MiB |
+| 10 (`--max`) | brain-fast | 16 MiB |
+| 11 | brain | 64 MiB |
 
-Blocks are independent of each other, so they are compressed and extracted on several cores at once.
+Blocks are independent of each other, so they are compressed and extracted on several cores at once. A brain codec block can only be coded on one core, which is why level 10 uses 16 MiB blocks: even a 50 MB input keeps several cores busy. Going from 64 MiB to 16 MiB blocks makes brain codec output about 2% larger.
 
 ## 16. Security considerations
 
 - **Path attacks (zip-slip)**: always check the path rules in §8. Extractors SHOULD create symbolic links after writing all regular files, and SHOULD NOT create links that point outside the extraction folder or to absolute paths unless the user allows it.
-- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb, and zstd window cap the memory a single block can use. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
+- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb (codecs 3 and 4), and zstd window cap the memory a single block can use. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
 - **Tampering**: check block hashes before writing and file hashes afterwards. If a signed archive's signature does not verify, extract nothing. See §12 for protection against deliberate tampering.
 - **Name collisions**: on case-insensitive file systems (the default on Windows and macOS), `A.txt` and `a.txt` are the same file, and macOS may treat names that differ only in Unicode normalization as the same name. On Windows, reserved names such as `CON`, `NUL`, and `COM1`, and a `:` inside a name (alternate data streams), are also dangerous. An extractor that detects such a collision SHOULD rename the file or stop, and not overwrite.
 - **Permissions**: setuid, setgid, and sticky bits are not restored by default (§8).
@@ -680,6 +717,7 @@ To find out whether this specification is precise enough to build a compatible i
 |---|---|
 | Parsing the header, trailer, root_hash, block table, and catalog | pass |
 | Decoding store / zstd / LZMA2 / brain codec (brain codec at tb=16 and tb=20) | pass, byte-for-byte identical to the reference implementation |
+| Decoding brain-fast (codec 4, added on 2026-10-02 from §6.5 alone, at tb=16 and tb=20) | pass, byte-for-byte identical to the reference implementation |
 | Undoing the x86 and ARM64 file transforms | pass |
 | Deduplicated chunk references (including references across blocks) | pass |
 | Encryption (Argon2id + BLAKE3 derive_key + XChaCha20-Poly1305), rejecting a wrong password | pass |
