@@ -1,0 +1,34 @@
+[package]
+name = "ezpz"
+version = "0.1.0"
+edition = "2024"
+description = "Reference implementation of the .ezpz archive format (with a learning 'brain' codec)"
+license = "MIT"
+repository = "https://github.com/ezpzfile/ezpz"
+readme = "README.md"
+keywords = ["compression", "archive", "file-format", "context-mixing"]
+categories = ["compression", "command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.104"
+argon2 = "0.5"
+blake3 = "1.8.7"
+chacha20poly1305 = "0.10"
+clap = { version = "4.6.7", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+fastcdc = "3"
+filetime = "0.2.29"
+hex = "0.4.3"
+liblzma = { version = "0.4.8", features = ["static", "parallel"] }
+rand = "0.8"
+rayon = "1.12.0"
+rpassword = "7.5.4"
+unicode-normalization = "0.1.25"
+walkdir = "2.5.0"
+zstd = { version = "0.13", features = ["zstdmt"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
