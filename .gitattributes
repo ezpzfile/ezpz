@@ -1,0 +1,4 @@
+# These files are hashed byte for byte (the priming data is part of the format, and the
+# test vectors are compared with their inputs), so git must never convert line endings.
+prime/** -text
+testvectors/** -text

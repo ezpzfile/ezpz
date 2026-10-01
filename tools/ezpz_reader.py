@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Independent clean-room .ezpz reader, written only from SPEC.md (v1.0 draft, round-2 text).
-Codec 4 (brain-fast, §6.5) was added later, also from SPEC.md alone.
+Codec 4 (brain-fast, §6.5) was added later, also from SPEC.md alone; it was then updated to the
+ezpz 0.3.0 layout (2-byte model mask, any subset of models 0..8), together with transform 3
+(x86-64, §9), again from SPEC.md alone. The priming flag P (§6.4.1 byte 0 bit 7) and priming
+(§6.4.11, Appendix B; codec 4 per §6.5) were added later, again from SPEC.md alone.
 
 usage: reader.py ARCHIVE [--out DIR] [--compare DIR --sub SUB] [--pub HEXFILE]
-                 [--password PW] [--brain-impl fast|ref]
+                 [--password PW] [--brain-impl fast|ref] [--prime FILE]
 
 Without --password, an encrypted archive is verified as far as the spec allows
 without the key (§14: steps 1-7 + every block hash) and then stops.
@@ -240,22 +243,92 @@ def wrap32(v):
     return ((v + 0x80000000) & M32) - 0x80000000
 
 
+# ---------------------------------------------------------------- priming data (§6.4.11, Appendix B)
+PRIME_V1_LEN = 75598
+PRIME_V1_BLAKE3 = "05f3a9a79ebd0a489559afc99ece7634838fe5b11aa13f84d5030cb693c1b1c2"
+PRIME_DEFAULT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                              os.pardir, "prime", "v1.txt"))
+_PRIME_CACHE = {}
+
+
+class PrimingDataError(FormatError):
+    """The local priming data file is missing or is not the Appendix B file (not an archive defect)."""
+
+
+def priming_data():
+    """Appendix B: version 1 of the priming data D (prime/v1.txt). Loaded once, and checked against
+    the stated size and BLAKE3-256 before first use ("Decoders MUST use exactly these bytes")."""
+    path = OPTS["prime"]
+    if path not in _PRIME_CACHE:
+        try:
+            with open(path, "rb") as fh:
+                d = fh.read()
+        except OSError as ex:
+            raise PrimingDataError(f"priming data (Appendix B): cannot read {path}: {ex}")
+        if len(d) != PRIME_V1_LEN:
+            raise PrimingDataError(f"priming data (Appendix B): {path} is {len(d)} bytes, expected "
+                                   f"{PRIME_V1_LEN}; refusing to decode a primed (P=1) block")
+        h = b3(d).hex()
+        if h != PRIME_V1_BLAKE3:
+            raise PrimingDataError(f"priming data (Appendix B): {path} has BLAKE3 {h}, expected "
+                                   f"{PRIME_V1_BLAKE3}; refusing to decode a primed (P=1) block")
+        log(f"    priming data: {path} ({len(d)} bytes, size and BLAKE3 match Appendix B)")
+        _PRIME_CACHE[path] = d
+    return _PRIME_CACHE[path]
+
+
+def brain_header(payload, codec):
+    """Payload header of codec 3 (§6.4.1) or codec 4 (§6.5).
+    Byte 0: bits 0..6 = tb, bit 7 = the priming flag P (§6.4.1; same byte layout for codec 4, §6.5).
+    Returns (tb, primed, models, mask, src): primed = P (0 or 1), models = the context model
+    indices in use, in increasing order (always 0..8 for codec 3), mask = the u16 model mask
+    (None for codec 3), src = the arithmetic coder input (from byte 1 for codec 3, from byte 3
+    for codec 4; priming does not move it, §6.4.11)."""
+    need(codec in (3, 4), f"brain: codec {codec}")
+    need(len(payload) >= 1, "brain: empty payload")
+    tb = payload[0] & 0x7F
+    primed = payload[0] >> 7
+    need(16 <= tb <= 25, f"brain: tb={tb} out of range")
+    if codec == 3:
+        return tb, primed, list(range(9)), None, payload[1:]
+    # §6.5: bytes 1-2 = model mask (u16 LE); bits 9..15 MUST be 0; any subset of 0..8 (even none)
+    need(len(payload) >= 3, "brain-fast: payload shorter than tb + 2-byte model mask")
+    mask = payload[1] | (payload[2] << 8)
+    need(mask & 0xFE00 == 0, f"brain-fast: model mask {mask:#06x} has bits 9..15 set (MUST reject)")
+    models = [i for i in range(9) if (mask >> i) & 1]
+    return tb, primed, models, mask, payload[3:]
+
+
+def all_ctx(c4, c8, word, pword):
+    """The nine ctx_i of §6.4.5 (computed at the byte boundary)."""
+    c1 = c4 & 0xFF
+    return [c1, c4 & 0xFFFF, c4 & 0xFFFFFF, c4,
+            hash2(c4, c8 & 0xFFFF),
+            hash2(c1, 0x5757) if word == 0 else word,
+            hash2(word, (pword + 0x3131) & M32),
+            c4 & 0x00FFFF00, c4 & 0xFF0000FF]
+
+
 def brain_decode_ref(payload, raw_len, codec=3):
     """Straight transcription of §6.4 (round-1 code). Slow but easy to audit.
-    codec=4 applies the §6.5 changes (brain-fast): models 0..5 only, a 9-entry input vector,
-    mixers A and C only (st = (stA + stC) >> 1), APM1 only."""
-    need(codec in (3, 4), f"brain: codec {codec}")
+    codec=4 applies the §6.5 changes (brain-fast): only the n context models named by the mask
+    (each keeping its own index i in the bucket hash), an (n+3)-entry input vector,
+    mixers A and C only (st = (stA + stC) >> 1), APM1 only.
+    P = 1 (§6.4.11): starting from the initial state, every bit of the priming data D (Appendix B),
+    most significant first, goes through prediction (§6.4.7) and learning (§6.4.8, with byte boundary
+    processing) exactly like a decoded bit, but y is taken from D and the arithmetic decoder is not
+    touched. D stays at the front of hist (the match model can point into it); only the block's
+    own bytes go to out. Codec 4 primes with its own models (§6.5)."""
+    tb, primed, models, mask, src = brain_header(payload, codec)
     light = codec == 4
-    need(len(payload) >= 1, "brain: empty payload")
-    tb = payload[0]
-    need(16 <= tb <= 25, f"brain: tb={tb} out of range")
-    src = payload[1:]
     srclen = len(src)
+    D = priming_data() if primed else b""
+    nprime = len(D)                 # hist[0:nprime] = D, then the decoded bytes
 
-    nm = 6 if light else 9          # context models: 0..8 (§6.4.5) or 0..5 (§6.5)
-    ni = nm + 3                     # mixer inputs: models, order 0, match, bias (12 or 9)
-    tables, shifts = [], []
-    for i in range(nm):
+    nm = len(models)                # context models: 0..8 (§6.4.5) or the mask's set bits (§6.5)
+    ni = nm + 3                     # mixer inputs: models, order 0, match, bias (12 for codec 3)
+    tables, shifts = [], []         # indexed by position k; models[k] is the model index i
+    for i in models:
         bits = min(tb, 18) if i == 0 else tb
         tables.append([0] * (1 << bits))
         shifts.append(32 - (bits - 5))
@@ -279,33 +352,26 @@ def brain_decode_ref(payload, raw_len, codec=3):
     base = [0] * nm
 
     def pick_buckets(ctx, c0):
-        for i in range(nm):
-            tbl = tables[i]
+        for k, i in enumerate(models):               # §6.5: model i keeps its own index i in the hash
+            tbl = tables[k]
             h = hash2((ctx[i] + (i << 28)) & M32, c0)
-            L = h >> shifts[i]
+            L = h >> shifts[k]
             chk = (((h * 0x2545F491) & M32) >> 16) | 1
             ln = L * 32
             if tbl[ln] == chk:
-                base[i] = ln
+                base[k] = ln
             elif tbl[ln + 16] == chk:
-                base[i] = ln + 16
+                base[k] = ln + 16
             else:
                 w = 0 if TOTAL[tbl[ln + 1] & 0x1FFF] < TOTAL[tbl[ln + 17] & 0x1FFF] else 16
                 b = ln + w
-                for k in range(16):
-                    tbl[b + k] = 0
+                for z in range(16):
+                    tbl[b + z] = 0
                 tbl[b] = chk
-                base[i] = b
+                base[k] = b
 
     def make_ctx():
-        c1 = c4 & 0xFF
-        ctx = [c1, c4 & 0xFFFF, c4 & 0xFFFFFF, c4,
-               hash2(c4, c8 & 0xFFFF),
-               hash2(c1, 0x5757) if word == 0 else word]
-        if not light:                                # models 6..8 exist in codec 3 only
-            ctx += [hash2(word, (pword + 0x3131) & M32),
-                    c4 & 0x00FFFF00, c4 & 0xFF0000FF]
-        return ctx
+        return all_ctx(c4, c8, word, pword)          # all nine; unused ones are simply not read
 
     x1, x2 = 0, M32
     x = 0
@@ -317,20 +383,20 @@ def brain_decode_ref(payload, raw_len, codec=3):
     pick_buckets(make_ctx(), c0)
     out = bytearray()
     xs = [0] * ni
-    xs[ni - 1] = 256                # bias: x[11] (codec 3) / x[8] (codec 4)
+    xs[ni - 1] = 256                # bias: x[11] (codec 3) / x[n+2] (codec 4)
     S = STRETCH
     idxs = [0] * nm
     sts = [0] * nm
 
     while len(out) < raw_len:
-        for i in range(nm):
+        for i in range(nm):         # i = position k: x[k] comes from model models[k] (§6.5)
             ix = base[i] + nib
             idxs[i] = ix
             s = tables[i][ix] & 0x1FFF
             sts[i] = s
             xs[i] = S[p12(SM[i][s])]
-        xs[nm] = S[p12(t0[c0])]     # order 0: x[9] (codec 3) / x[6] (codec 4)
-        xs[nm + 1] = 0              # match: x[10] (codec 3) / x[7] (codec 4)
+        xs[nm] = S[p12(t0[c0])]     # order 0: x[9] (codec 3) / x[n] (codec 4)
+        xs[nm + 1] = 0              # match: x[10] (codec 3) / x[n+1] (codec 4)
         mctx = -1
         if m_len > 0:
             pb = hist[m_ptr] | 0x100
@@ -384,19 +450,23 @@ def brain_decode_ref(payload, raw_len, codec=3):
         elif p > 4095:
             p = 4095
 
-        rng = x2 - x1
-        xmid = x1 + (rng >> 12) * p + (((rng & 0xFFF) * p) >> 12)
-        if x <= xmid:
-            y = 1
-            x2 = xmid
+        if len(hist) < nprime:
+            # §6.4.11 priming: y is the next bit of D (most significant first); nothing is coded
+            y = (D[len(hist)] >> (7 - bitpos)) & 1
         else:
-            y = 0
-            x1 = xmid + 1
-        while ((x1 ^ x2) & 0xFF000000) == 0:
-            x1 = (x1 << 8) & M32
-            x2 = ((x2 << 8) & M32) | 255
-            x = ((x << 8) & M32) | (src[sp] if sp < srclen else 0)
-            sp += 1
+            rng = x2 - x1
+            xmid = x1 + (rng >> 12) * p + (((rng & 0xFFF) * p) >> 12)
+            if x <= xmid:
+                y = 1
+                x2 = xmid
+            else:
+                y = 0
+                x1 = xmid + 1
+            while ((x1 ^ x2) & 0xFF000000) == 0:
+                x1 = (x1 << 8) & M32
+                x2 = ((x2 << 8) & M32) | 255
+                x = ((x << 8) & M32) | (src[sp] if sp < srclen else 0)
+                sp += 1
 
         NX = NEXT1 if y else NEXT0
         for i in range(nm):
@@ -424,7 +494,8 @@ def brain_decode_ref(payload, raw_len, codec=3):
         if bitpos == 8:
             c = c0 & 0xFF
             hist.append(c)
-            out.append(c)
+            if len(hist) > nprime:  # a decoded byte; priming bytes (§6.4.11) go to hist only
+                out.append(c)
             c8 = ((c8 << 8) | (c4 >> 24)) & M32
             c4 = ((c4 << 8) | c) & M32
             lc = c + 32 if 0x41 <= c <= 0x5A else c
@@ -468,21 +539,22 @@ def brain_decode_ref(payload, raw_len, codec=3):
 
 def brain_decode_fast(payload, raw_len, codec=3):
     """Same arithmetic as brain_decode_ref, restructured for CPython speed (list comps, locals).
-    Cross-checked byte-for-byte against brain_decode_ref. codec=4 selects brain-fast (§6.5)."""
-    need(codec in (3, 4), f"brain: codec {codec}")
+    Cross-checked byte-for-byte against brain_decode_ref. codec=4 selects brain-fast (§6.5).
+    P = 1: priming as in brain_decode_ref (§6.4.11); hist (here: out) starts with D."""
+    tb, primed, models, mask, src = brain_header(payload, codec)
     light = codec == 4
-    need(len(payload) >= 1, "brain: empty payload")
-    tb = payload[0]
-    need(16 <= tb <= 25, f"brain: tb={tb} out of range")
-    src = payload[1:]
     n_src = len(src)
     if raw_len == 0:
         return b"", 0, n_src
+    D = priming_data() if primed else b""
+    nprime = len(D)
+    end = nprime + raw_len                            # len(hist) once the block is complete
+    pleft = 8 * nprime                                # priming bits still to learn from (§6.4.11)
 
-    nm = 6 if light else 9                            # context models (§6.4.5 / §6.5)
-    ni = nm + 3                                       # mixer inputs: 12 (codec 3) or 9 (codec 4)
-    tables, shifts = [], []
-    for i in range(nm):
+    nm = len(models)                                  # context models (§6.4.5 / §6.5 mask)
+    ni = nm + 3                                       # mixer inputs: 12 (codec 3) or n+3 (codec 4)
+    tables, shifts = [], []                           # by position k; models[k] = model index i
+    for i in models:
         bits = min(tb, 18) if i == 0 else tb          # §6.4.5: model 0 capped at 18
         tables.append([0] * (1 << bits))
         shifts.append(32 - (bits - 5))
@@ -502,30 +574,28 @@ def brain_decode_fast(payload, raw_len, codec=3):
     SQ = SQTAB
     RC = RECIP
     Z16 = [0] * 16
-    zipped_ts = list(zip(range(nm), tables, shifts))
+    zipped_ts = list(zip(range(nm), models, tables, shifts))
 
     def pick(ctx, c0, base):
-        for i, tbl, sh in zipped_ts:
+        for k, i, tbl, sh in zipped_ts:               # §6.5: model i keeps its own index i
             h = hash2((ctx[i] + (i << 28)) & M32, c0)
             ln = (h >> sh) * 32
             chk = (((h * 0x2545F491) & M32) >> 16) | 1
             if tbl[ln] == chk:
-                base[i] = ln
+                base[k] = ln
             elif tbl[ln + 16] == chk:
-                base[i] = ln + 16
+                base[k] = ln + 16
             else:
                 b = ln if TOTAL[tbl[ln + 1] & 0x1FFF] < TOTAL[tbl[ln + 17] & 0x1FFF] else ln + 16
                 tbl[b:b + 16] = Z16
                 tbl[b] = chk
-                base[i] = b
+                base[k] = b
 
     c0 = nib = 1
     bitpos = c4 = c8 = word = pword = 0
-    out = bytearray()          # == hist
+    out = bytearray()          # == hist: D first when primed (§6.4.11), then the decoded bytes
     base = [0] * nm
-    ctx = [0, 0, 0, 0, hash2(0, 0), hash2(0, 0x5757)]
-    if not light:
-        ctx += [hash2(0, 0x3131), 0, 0]
+    ctx = all_ctx(0, 0, 0, 0)  # §6.4.9: ctx values computed once before the first byte
     pick(ctx, 1, base)
 
     x1, x2 = 0, M32
@@ -546,7 +616,7 @@ def brain_decode_fast(payload, raw_len, codec=3):
             if (pb >> sh) == c0:
                 mctx = lq * 2 + ((pb >> (sh - 1)) & 1)
                 x10 = S[((m_sm[mctx] >> 10) ^ 0x200000) >> 10]
-        xs.append(x10)             # match input: x[10] (codec 3) / x[7] (codec 4)
+        xs.append(x10)             # match input: x[10] (codec 3) / x[n+1] (codec 4)
         xs.append(256)
         c1 = c4 & 0xFF
         wa = WA[c0]
@@ -578,20 +648,25 @@ def brain_decode_fast(payload, raw_len, codec=3):
             p = (pm + a1 + 2 * a2 + 2) >> 2
         p = 1 if p < 1 else (4095 if p > 4095 else p)
 
-        # ---- arithmetic decode (§6.4.10)
-        r = x2 - x1
-        xm = x1 + (r >> 12) * p + (((r & 0xFFF) * p) >> 12)
-        if x <= xm:
-            y = 1
-            x2 = xm
+        if pleft:
+            # ---- priming (§6.4.11): y = next bit of D, most significant first; nothing is coded
+            y = (D[len(out)] >> (7 - bitpos)) & 1
+            pleft -= 1
         else:
-            y = 0
-            x1 = xm + 1
-        while not ((x1 ^ x2) & 0xFF000000):
-            x1 = (x1 << 8) & M32
-            x2 = ((x2 << 8) & M32) | 255
-            x = ((x << 8) & M32) | (src[sp] if sp < n_src else 0)
-            sp += 1
+            # ---- arithmetic decode (§6.4.10)
+            r = x2 - x1
+            xm = x1 + (r >> 12) * p + (((r & 0xFFF) * p) >> 12)
+            if x <= xm:
+                y = 1
+                x2 = xm
+            else:
+                y = 0
+                x1 = xm + 1
+            while not ((x1 ^ x2) & 0xFF000000):
+                x1 = (x1 << 8) & M32
+                x2 = ((x2 << 8) & M32) | 255
+                x = ((x << 8) & M32) | (src[sp] if sp < n_src else 0)
+                sp += 1
 
         # ---- learn (§6.4.8)
         if y:
@@ -664,10 +739,10 @@ def brain_decode_fast(payload, raw_len, codec=3):
             c = c0 & 0xFF
             out.append(c)
             pos = len(out)
-            if pos == raw_len:
+            if pos == end:
                 break
-            if not (pos & 0xFFFF):
-                print(f"      ... brain progress {pos}/{raw_len} bytes", file=sys.stderr, flush=True)
+            if pos > nprime and not ((pos - nprime) & 0xFFFF):
+                print(f"      ... brain progress {pos - nprime}/{raw_len} bytes", file=sys.stderr, flush=True)
             c8 = ((c8 << 8) | (c4 >> 24)) & M32
             c4 = ((c4 << 8) | c) & M32
             lc = c + 32 if 65 <= c <= 90 else c
@@ -702,22 +777,16 @@ def brain_decode_fast(payload, raw_len, codec=3):
             lq = m_len if m_len < 16 else min(16 + ((m_len - 16) >> 2), 31)
             c0 = nib = 1
             bitpos = 0
-            c1 = c4 & 0xFF
-            ctx = [c1, c4 & 0xFFFF, c4 & 0xFFFFFF, c4,
-                   hash2(c4, c8 & 0xFFFF),
-                   hash2(c1, 0x5757) if word == 0 else word]
-            if not light:                             # §6.5: only ctx_0..ctx_5 in codec 4
-                ctx += [hash2(word, (pword + 0x3131) & M32),
-                        c4 & 0x00FFFF00, c4 & 0xFF0000FF]
+            ctx = all_ctx(c4, c8, word, pword)        # pick() reads only the models in use
             pick(ctx, 1, base)
         elif bitpos == 4:
             nib = 1
             pick(ctx, c0, base)           # same ctx_i as at the byte boundary (§6.4.5)
-    return bytes(out), sp, n_src
+    return bytes(out[nprime:]), sp, n_src
 
 
 BRAIN_IMPL = {"fast": brain_decode_fast, "ref": brain_decode_ref}
-OPTS = {"brain": "fast"}
+OPTS = {"brain": "fast", "prime": PRIME_DEFAULT}
 
 
 # ---------------------------------------------------------------- codecs (§6)
@@ -756,7 +825,10 @@ def decompress(codec, payload, raw_len, what, index=False):
     if codec in (3, 4):             # brain (§6.4) / brain-fast (§6.5); data blocks only
         name = "brain" if codec == 3 else "brain-fast"
         out, used, avail = BRAIN_IMPL[OPTS["brain"]](payload, raw_len, codec)
-        log(f"    {name}[{OPTS['brain']}]: tb={payload[0]} consumed {min(used, avail)}/{avail} AC bytes "
+        tb, primed, models, mask, _ = brain_header(payload, codec)
+        mtxt = "" if mask is None else f" mask={mask:#06x} models={models}"
+        ptxt = f" P=1 (primed with {PRIME_V1_LEN} bytes)" if primed else " P=0"
+        log(f"    {name}[{OPTS['brain']}]: tb={tb}{ptxt}{mtxt} consumed {min(used, avail)}/{avail} AC bytes "
             f"(+{max(0, used - avail)} implicit zero bytes)")
         need(len(out) == raw_len, f"{what}: {name} length mismatch")
         return out
@@ -844,6 +916,59 @@ def arm64(buf, encode):
             cnt += 1
         i += 4
     return bytes(buf), cnt
+
+
+# §9 transform 3: byte-value sets copied from the spec text (hexadecimal)
+OP1_X64 = frozenset(bytes.fromhex(
+    "01 03 09 0B 21 23 29 2B 31 33 38 39 3A 3B 63 80 81 83 84 85 88 89 8A 8B 8D C6 C7 F7 FF"))
+OP2_X64 = frozenset(bytes.fromhex(
+    "10 11 12 13 16 17 28 29 2A 2E 2F 51 54 57 58 59 5A 5C 5E 6F 74 76 7F B6 B7 BE BF D6 DB EB EF"))
+
+
+def conv24(buf, off, pos, encode):
+    """§9 conv24: the 24-bit rule of transform 1 for the u32le field at off. Returns 1 if rewritten."""
+    v = buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24)
+    if (v >> 23) == 0 or (v >> 23) == 0x1FF:
+        r = ((v + pos) if encode else (v - pos)) & 0x00FFFFFF
+        if r & 0x00800000:
+            r |= 0xFF000000
+        struct.pack_into("<I", buf, off, r)
+        return 1
+    return 0
+
+
+def x86_64(buf, encode):
+    """§9 transform 3 (x86-64: E8/E9 plus RIP-relative disp32 after a mod=00 r/m=101 ModRM).
+    Transcribed from the pseudocode: a matched field is skipped whether or not conv24 rewrote it,
+    and conv24 gets pos = i (where the walk stood, i.e. the legacy prefix if there is one)."""
+    buf = bytearray(buf)
+    n = len(buf)
+    i = 0
+    calls = rips = 0
+    while i + 5 <= n:
+        c = buf[i]
+        if c == 0xE8 or c == 0xE9:
+            calls += conv24(buf, i + 1, i, encode)
+            i += 5
+            continue
+        j = i
+        if c == 0x66 or c == 0xF2 or c == 0xF3:       # one legacy prefix
+            j += 1
+        if j < n and (buf[j] & 0xF0) == 0x40:         # REX prefix
+            j += 1
+        if j + 7 <= n and buf[j] == 0x0F and buf[j + 1] in OP2_X64 and (buf[j + 2] & 0xC7) == 0x05:
+            rips += conv24(buf, j + 3, i, encode)
+            i = j + 7
+            continue
+        if j + 6 <= n and buf[j] in OP1_X64 and (buf[j + 1] & 0xC7) == 0x05:
+            rips += conv24(buf, j + 2, i, encode)
+            i = j + 6
+            continue
+        i += 1
+    return bytes(buf), calls, rips
+
+
+TRANSFORMS = (0, 1, 2, 3)          # §9 table
 
 
 # ---------------------------------------------------------------- path rules (§8)
@@ -1056,6 +1181,8 @@ def read_archive(path, pubhex=None, chunkref_mode="global", password=None):
     links = [i for i in range(m) if types[i] == 2]
     f = len(files)
     transforms = [cr.u8() for _ in range(f)]
+    for tf in transforms:                            # §9 ids 0..3; anything else is not understood (§17)
+        need(tf in TRANSFORMS, f"unknown transform id {tf}")
     nchunks = [cr.varint() for _ in range(f)]
     refs = []
     prevref = -1
@@ -1121,6 +1248,10 @@ def read_archive(path, pubhex=None, chunkref_mode="global", password=None):
         elif tf == 2:
             content, cnt = arm64(content, False)
             log(f"    {spaths[i]}: undid ARM64 transform ({cnt} BL words rewritten)")
+        elif tf == 3:
+            content, calls, rips = x86_64(content, False)
+            log(f"    {spaths[i]}: undid x86-64 transform ({calls} E8/E9 operands, "
+                f"{rips} RIP-relative displacements rewritten)")
         else:
             need(tf == 0, f"unknown transform {tf}")
         if hash_len:
@@ -1224,8 +1355,12 @@ def main():
     ap.add_argument("--sub", default="", help="compare --compare against OUT/SUB")
     ap.add_argument("--chunkref", default="global", choices=["global", "perfile"])
     ap.add_argument("--brain-impl", default="fast", choices=["fast", "ref"])
+    ap.add_argument("--prime", default=PRIME_DEFAULT,
+                    help="priming data file for P=1 brain blocks (Appendix B; default: ../prime/v1.txt "
+                         "relative to this script). Size and BLAKE3 are checked before use.")
     a = ap.parse_args()
     OPTS["brain"] = a.brain_impl
+    OPTS["prime"] = a.prime
     pub = open(a.pub).read().strip() if a.pub else None
     try:
         entries = read_archive(a.archive, pub, a.chunkref, a.password)

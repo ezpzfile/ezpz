@@ -36,6 +36,8 @@ for c in zstd lzma2 brain brain-fast store; do
   rm -rf out; "$B" c c_$c.ezpz src --codec $c >/dev/null 2>&1 && "$B" x c_$c.ezpz -C out >/dev/null 2>&1 \
     && diff -r -x escape src out/src >/dev/null && ok "codec $c" || bad "codec $c"
 done
+rm -rf out; "$B" c m.ezpz src --codec brain-fast --brain-mask 0x155 >/dev/null 2>&1 && "$B" x m.ezpz -C out >/dev/null 2>&1 \
+  && diff -r -x escape src out/src >/dev/null && ok "brain-fast with an unusual model mask" || bad "brain-fast with an unusual model mask"
 s1=$(stat -c %s a6.ezpz); [ "$s1" -lt 4000000 ] && ok "dedup stores repeated 3MB once ($s1 bytes)" || bad "dedup ($s1 bytes)"
 
 echo "[random access]"

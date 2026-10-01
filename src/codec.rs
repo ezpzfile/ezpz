@@ -34,7 +34,7 @@ pub fn compress(raw: &[u8], plan: Plan) -> Result<(u8, Vec<u8>)> {
         Plan::Brain(profile) => (
             match profile {
                 crate::brain::Profile::Full => CODEC_BRAIN,
-                crate::brain::Profile::Fast => CODEC_BRAIN_FAST,
+                _ => CODEC_BRAIN_FAST,
             },
             crate::brain::compress(raw, profile),
         ),

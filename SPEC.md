@@ -33,7 +33,7 @@ English | [한국어](SPEC.ko.md)
 - **Blocks.** Files are sorted so that similar ones sit next to each other, joined end to end, and cut into blocks of a fixed size (for example 32 MiB) that are compressed separately. Joining them lets the compressor use similarities between files (solid compression). Cutting them into blocks means that extracting one file only requires decompressing the blocks that contain it.
 - **Deduplication.** File contents are split at boundaries chosen by the content itself, so identical content becomes identical chunks wherever it appears, and each chunk is stored once. This pays off most when an archive holds several versions of the same project.
 - **Integrity chain.** The trailer at the end holds a hash of the header and the index, and the index holds a hash of every block, so accidental damage to even one byte is always detected. Anyone can recompute these hashes, though. Detecting deliberate changes needs a signature, or a copy of the hash kept somewhere trusted. The signature sits at the top of the chain.
-- **Brain codec.** It predicts each bit before coding it and stores only how far the prediction was off. Several small predictors each give an estimate, and a small neural network learns, as it goes, which of them to trust in the current situation. The compressor and the decompressor learn in exactly the same way, like twins, so the learned model never has to be stored in the file. A lighter version, brain-fast, runs fewer predictors: it is 1.2 to 2 times as fast, depending on the processor, and its output is 1.5 to 8% larger, depending on the data.
+- **Brain codec.** It predicts each bit before coding it and stores only how far the prediction was off. Several small predictors each give an estimate, and a small neural network learns, as it goes, which of them to trust in the current situation. The compressor and the decompressor learn in exactly the same way, like twins, so the learned model never has to be stored in the file. A lighter version, brain-fast, runs only some of the nine predictors (six in the reference encoder), chosen for each block to suit the data. It is 1.2 to 2 times as fast, depending on the processor, and its output is about 2% larger.
 
 ---
 
@@ -145,7 +145,7 @@ Data blocks, the block table, and the catalog all start with the same 16-byte fr
 | 1 | zstd | One or more RFC 8878 Zstandard frames |
 | 2 | lzma2 | A dictionary-size property byte followed by a raw LZMA2 stream |
 | 3 | brain | A table-size byte followed by an arithmetic-coded bit stream (§6.4) |
-| 4 | brain-fast | Same layout as brain, coded with fewer models (§6.5) |
+| 4 | brain-fast | A table-size byte, a 2-byte model mask, then an arithmetic-coded bit stream (§6.5) |
 | 5-255 | reserved | Unknown codecs MUST be treated as an error |
 
 Encoders SHOULD store a block with codec 0 when compression does not make it smaller.
@@ -168,10 +168,10 @@ The payload (after decryption, in an encrypted archive) is the original data, an
 The brain codec predicts one bit at a time and codes it with an arithmetic coder. Compressor and decompressor MUST perform exactly the computations in this section. Only integer arithmetic is used, so every CPU produces the same result, and changing a single constant breaks compatibility.
 
 #### 6.4.1 Payload layout
-- Byte 0: `tb`, the hash table size exponent (each table has 2^tb u16 slots). Decoders MUST accept only 16 ≤ tb ≤ 25. The reference encoder uses `tb = clamp(ceil(log2(raw_len)) + 1, 16, 24)`.
+- Byte 0: bits 0 to 6 are `tb`, the hash table size exponent (table sizes are given in §6.4.5), and bit 7 is the priming flag `P`. Decoders MUST accept only 16 ≤ tb ≤ 25. When P = 1 the block was coded after priming (§6.4.11). The reference encoder uses `tb = clamp(ceil(log2(n)) + 1, 16, 24)`, where n = raw_len when P = 0 and n = raw_len + the length of the priming data when P = 1.
 - From byte 1 on: the arithmetic coder output (§6.4.10).
 - Each byte of the original data is coded as 8 bits, most significant bit first.
-- Memory use (informative): about `16 × 2^tb + 2^(tb-1) + raw_len + 5 MiB` bytes, roughly 330 MiB for tb = 24 with a 64 MiB block.
+- Memory use (informative): about `16 × 2^tb + 2^(tb-1) + raw_len + 5 MiB` bytes (plus the priming data when P = 1), roughly 330 MiB for tb = 24 with a 64 MiB block.
 
 #### 6.4.2 Basic functions
 
@@ -435,24 +435,32 @@ decode: x = the first 4 bytes (big-endian); reading past the end of the input yi
 
 Decoding stops after exactly raw_len bytes. Any remaining input is ignored (the block hash guarantees integrity).
 
+#### 6.4.11 Priming
+
+When P = 1, the model first learns from the priming data D (Appendix B) before the first bit of the block. It starts from the usual initial state, including the one-time context computation and bucket selection that §6.4.9 places before the first byte. Then, for each byte of D and each of its 8 bits, most significant first, it computes the full prediction (§6.4.7) and learns from that bit (§6.4.8, including byte boundary processing). The probability itself is not used, but learning needs the mixer outputs, weight sets, and APM entries that the prediction computes, so none of it may be skipped. Nothing is arithmetic coded during priming. The bytes of D end up in hist like decoded bytes, so the match model can point into them.
+
+Nothing is reset between D and the block: c0, nib, bitpos, c4, c8, word, pword, hist, and the match model state all carry over. The block's raw_len bytes are then coded or decoded from that state (raw_len does not include D), and the arithmetic decoder starts at the first byte of the coded stream as usual.
+
+Priming costs the time it takes to process D (75,598 bytes in version 1) and helps small blocks most (informative): about 9% smaller on files of 5 to 35 KB, and under 1% on blocks of 1 MiB or more. The reference encoder codes each block of up to 1 MiB both with and without priming and keeps the smaller result. It does not prime larger blocks.
+
 ### 6.5 brain-fast (codec 4)
 
-brain-fast is the brain codec with fewer models. Depending on the processor it runs 1.2 to 2 times as fast as codec 3, and its output is 1.5 to 8% larger: the least on plain text, the most on program files. Everything in §6.4 applies, with the changes below.
+brain-fast is the brain codec with fewer models and fewer mixing stages. Each block names the context models of §6.4.5 that it uses, so the encoder can pick the ones that suit the data. Depending on the processor it runs 1.2 to 2 times as fast as codec 3, and its output is about 2% larger on average (up to 8% on some data). Everything in §6.4 applies, with the changes below.
 
-- **Payload layout** (§6.4.1): unchanged, including the rule 16 ≤ tb ≤ 25. Memory use (informative): about `10 × 2^tb + 2^(tb-1) + raw_len + 1 MiB` bytes, roughly 185 MiB for tb = 24 with a 16 MiB block.
-- **Context models** (§6.4.5): only models 0 to 5 (order 1, order 2, order 3, order 4, order 6, word). Models 6, 7, and 8 do not exist, so there are six hash tables and six state maps. Table sizes follow §6.4.5: model 0 uses `bits = min(tb, 18)` and models 1 to 5 use `bits = tb`. At every byte boundary only ctx_0 to ctx_5 are computed, and bucket selection runs over i = 0..5 with the same formula.
-- **Input vector** (§6.4.7): x has 9 entries.
+- **Payload layout**: byte 0 holds `tb` and the priming flag `P` as in §6.4.1 (16 ≤ tb ≤ 25). Priming (§6.4.11) works the same way, using this codec's predictor for the block: the models in the mask, mixers A and C, and APM1. Bytes 1 and 2 are the model mask `mask` (u16, little-endian): bit i set means context model i of §6.4.5 is used. Bits 9 to 15 MUST be 0, and decoders MUST reject a block in which any of them is set. Any combination of bits 0 to 8 is allowed, including none. The arithmetic coder output (§6.4.10) starts at byte 3. A payload shorter than 3 bytes is invalid.
+- **Context models**: let n be the number of set bits, and i_0 < i_1 < ... < i_(n-1) the indices of the models that are set. Only those models exist: n hash tables and n state maps, with the table sizes of §6.4.5 (model 0 uses `bits = min(tb, 18)`, and all other models use `bits = tb`). Each model keeps its own index i in the bucket hash `hash2(ctx_i + (i << 28), c0)`. The ctx values of unused models do not need to be computed.
+- **Input vector** (§6.4.7): x has n + 3 entries.
 
   ```
-  x[i] = stretch(p12(SM_i[s_i]))       i = 0..5
-  x[6] = stretch(p12(t0[c0]))
-  x[7] = the match model input, computed exactly like x[10] in §6.4.7 (0 when mctx is none)
-  x[8] = 256                           # bias
+  x[k]   = stretch(p12(SM_(i_k)[s_(i_k)]))    k = 0..n-1
+  x[n]   = stretch(p12(t0[c0]))
+  x[n+1] = the match model input, computed exactly like x[10] in §6.4.7 (0 when mctx is none)
+  x[n+2] = 256                              # bias
   ```
 
   mctx is set exactly as in §6.4.7, and learning step 3 still updates `m_sm[mctx]`.
 
-- **Mixers**: two mixers, A and C, each with 256 weight sets of 9 i32 weights, all initialized to `16384`. Mixer B does not exist. `mix` is the function from §6.4.7 with the sum taken over i = 0..8.
+- **Mixers**: two mixers, A and C, each with 256 weight sets of n + 3 i32 weights, all initialized to `16384`. Mixer B does not exist. `mix` is the function from §6.4.7 with the sum taken over the n + 3 inputs.
 
   ```
   st = (mix(A, c0) + mix(C, c1)) >> 1   # arithmetic shift; st stays in -2047 ..= 2047
@@ -466,9 +474,20 @@ brain-fast is the brain codec with fewer models. Depending on the processor it r
   p  = clamp((pm + 3*a1 + 2) >> 2, 1, 4095)
   ```
 
-- **Learning** (§6.4.8): step 1 runs for i = 0..5, step 4 updates mixers A and C over i = 0..8, and step 5 updates APM1 only. Steps 2, 3, 6, and 7 are unchanged.
+- **Learning** (§6.4.8): step 1 runs for the n models, step 4 updates mixers A and C over the n + 3 inputs, and step 5 updates APM1 only. Steps 2, 3, 6, and 7 are unchanged.
 
 The counters and bit histories (§6.4.3), the match model (§6.4.6), byte boundary processing (§6.4.9), and the arithmetic coder (§6.4.10) are the same as in codec 3.
+
+Memory use (informative): about `2m × 2^tb + 2^(tb-1) + raw_len + 1 MiB` bytes, where m is the number of models in the mask other than model 0. For the masks below (m = 5) with tb = 24 and a 16 MiB block that is roughly 185 MiB.
+
+**Choosing the mask** (informative). The reference encoder tries two masks:
+
+| Mask | Models | Suits |
+|---|---|---|
+| `0x003F` | 0 to 5: order 1, 2, 3, 4, 6, word | text |
+| `0x01CB` | 0, 1, 3, 6, 7, 8: order 1, 2, 4, word pair, both sparse contexts | binary data and machine code |
+
+A block of up to 192 KiB is coded with both masks, and the smaller result is kept. For a larger block, a 192 KiB sample (64 KiB each from the start, the middle, and the end) is coded with both, and `0x01CB` is used only if its output is at least 0.5% smaller: on short samples the binary set looks better than it later turns out to be on the whole block.
 
 ## 7. Block table (`EZBT`, always plaintext)
 
@@ -544,6 +563,7 @@ These transforms turn relative jump targets in machine code into absolute addres
 | 0 | none |
 | 1 | x86 (E8/E9) |
 | 2 | ARM64 (BL) |
+| 3 | x86-64 (E8/E9 and RIP-relative addresses) |
 
 ```
 x86(buf, encode):
@@ -569,6 +589,37 @@ arm64(buf, encode):
 ```
 
 Both transforms are exactly reversible. For x86, a transformed value stays within the same range, so the decoder can tell which values were changed.
+
+**x86-64 (transform 3).** 64-bit x86 code refers to global data and to the GOT through RIP-relative addresses: a 32-bit displacement right after a ModRM byte whose mod field is 00 and whose r/m field is 101. Transform 3 converts those displacements as well as CALL and JMP targets, with the same 24-bit rule as transform 1. The position added to an address is `i`, the offset of the first byte of the matched pattern (a prefix, a REX byte, or the opcode). Every matched address field is skipped afterwards, whether or not it was in range and converted. A failed check at `i` looks at bytes up to `i + 4` at most, and the byte values that start a pattern (E8, E9, 66, F2, F3, 40 to 4F, 0F) are in neither OP1 nor OP2. Together this makes the decoder retrace the encoder's path exactly. Changing OP1 or OP2 would need the same care.
+
+```
+conv24(buf, off, pos, encode):                # the rule of transform 1, for a field at off
+  v = u32le(buf[off..off+4])
+  if (v >> 23) == 0 or (v >> 23) == 0x1FF:
+    r = (encode ? v + pos : v - pos) & 0x00FFFFFF
+    if r & 0x00800000: r |= 0xFF000000
+    buf[off..off+4] = u32le(r)
+
+OP1 = {01 03 09 0B 21 23 29 2B 31 33 38 39 3A 3B 63 80 81 83 84 85 88 89 8A 8B 8D C6 C7 F7 FF}
+OP2 = {10 11 12 13 16 17 28 29 2A 2E 2F 51 54 57 58 59 5A 5C 5E 6F 74 76 7F B6 B7 BE BF D6 DB EB EF}
+
+x86_64(buf, encode):
+  n = len(buf) ; i = 0
+  while i + 5 <= n:
+    c = buf[i]
+    if c == 0xE8 or c == 0xE9:
+      conv24(buf, i+1, i, encode) ; i += 5 ; continue
+    j = i
+    if c == 0x66 or c == 0xF2 or c == 0xF3: j += 1    # one legacy prefix
+    if j < n and (buf[j] & 0xF0) == 0x40: j += 1       # REX prefix
+    if j + 7 <= n and buf[j] == 0x0F and buf[j+1] in OP2 and (buf[j+2] & 0xC7) == 0x05:
+      conv24(buf, j+3, i, encode) ; i = j + 7 ; continue
+    if j + 6 <= n and buf[j] in OP1 and (buf[j+1] & 0xC7) == 0x05:
+      conv24(buf, j+2, i, encode) ; i = j + 6 ; continue
+    i += 1
+```
+
+OP1 and OP2 are sets of byte values (hexadecimal). Encoders SHOULD check that decoding gives back the original file and use transform 1 if it does not; the reference encoder does this for every file, although no failing input is known.
 
 ## 10. Signature section (104 bytes, optional)
 
@@ -659,7 +710,7 @@ Without the password, a reader can still carry out steps 1 to 7 and check every 
 Decoders do not need anything in this section. It describes how the reference encoder makes good use of the format.
 
 ### 15.1 Classifying and ordering files
-- Classify each file from its first 64 KiB: executables (architecture detected from ELF, Mach-O, or PE headers), already-compressed files (detected by extension, magic bytes, and a quick trial compression), and everything else.
+- Classify each file from its first 64 KiB: executables (architecture detected from ELF, Mach-O, or PE headers), already-compressed files (detected by extension, magic bytes, and a quick trial compression), and everything else. 64-bit x86 executables get transform 3, 32-bit x86 executables transform 1, and ARM64 executables transform 2.
 - Group already-compressed files into separate blocks stored with codec 0, which saves time.
 - Order executables by (architecture, size), so that similar builds of the same program sit together and one huge file does not push related files far apart.
 - Order everything else by (extension, file name, path), so that, for example, files with the same name from different versions end up side by side.
@@ -689,7 +740,7 @@ Blocks are independent of each other, so they are compressed and extracted on se
 ## 16. Security considerations
 
 - **Path attacks (zip-slip)**: always check the path rules in §8. Extractors SHOULD create symbolic links after writing all regular files, and SHOULD NOT create links that point outside the extraction folder or to absolute paths unless the user allows it.
-- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb (codecs 3 and 4), and zstd window cap the memory a single block can use. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
+- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb (codecs 3 and 4), and zstd window cap the memory a single block can use. Priming adds a fixed 75,598 bytes. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
 - **Tampering**: check block hashes before writing and file hashes afterwards. If a signed archive's signature does not verify, extract nothing. See §12 for protection against deliberate tampering.
 - **Name collisions**: on case-insensitive file systems (the default on Windows and macOS), `A.txt` and `a.txt` are the same file, and macOS may treat names that differ only in Unicode normalization as the same name. On Windows, reserved names such as `CON`, `NUL`, and `COM1`, and a `:` inside a name (alternate data streams), are also dangerous. An extractor that detects such a collision SHOULD rename the file or stop, and not overwrite.
 - **Permissions**: setuid, setgid, and sticky bits are not restored by default (§8).
@@ -699,10 +750,11 @@ Blocks are independent of each other, so they are compressed and extracted on se
 
 - Incompatible changes increase version_major.
 - New features are added as (a) new codec ids, (b) header extension records, with the critical bit if needed, or (c) new flag bits. Older decoders are designed to reject anything they do not understand, with a clear error, instead of silently producing wrong output.
+- Draft history: ezpz 0.2.0 (2026-10-02) added codec 4. ezpz 0.3.0 gave codec 4 its model mask (§6.5) and added transform 3 (§9). Blocks that 0.2.0 wrote with codec 4 cannot be read by later versions.
 
 ## 18. Future work (candidates for v1.x and later)
 
-- **Built-in knowledge (pretraining)**: start the brain codec from a state that has already learned common text and code patterns, which helps small files most.
+- **Built-in knowledge for zstd**: use the priming data (Appendix B) as a zstd dictionary as well, so small files also shrink more at the default level.
 - **Recovery records**: Reed-Solomon parity blocks that repair partial damage.
 - **Append**: add files to an existing archive while deduplicating against the chunks already stored.
 - **Deflate recompression**: decompress the deflate streams inside zip, docx, and png files to compress them better, and restore the original bytes exactly on extraction.
@@ -717,7 +769,9 @@ To find out whether this specification is precise enough to build a compatible i
 |---|---|
 | Parsing the header, trailer, root_hash, block table, and catalog | pass |
 | Decoding store / zstd / LZMA2 / brain codec (brain codec at tb=16 and tb=20) | pass, byte-for-byte identical to the reference implementation |
-| Decoding brain-fast (codec 4, added on 2026-10-02 from §6.5 alone, at tb=16 and tb=20) | pass, byte-for-byte identical to the reference implementation |
+| Decoding brain-fast (codec 4), added later from §6.5 alone: model masks 0x003F, 0x01CB, and 0x0155 at tb=16, 19, and 20 | pass, byte-for-byte identical to the reference implementation |
+| Undoing the x86-64 transform (transform 3), added later from §9 alone: one synthetic file and 28 real programs | pass |
+| Brain codec priming (§6.4.11, Appendix B), added later from the specification alone: codecs 3 and 4, blocks of 1 KiB to 260 KiB | pass, byte-for-byte identical to the reference implementation |
 | Undoing the x86 and ARM64 file transforms | pass |
 | Deduplicated chunk references (including references across blocks) | pass |
 | Encryption (Argon2id + BLAKE3 derive_key + XChaCha20-Poly1305), rejecting a wrong password | pass |
@@ -725,3 +779,9 @@ To find out whether this specification is precise enough to build a compatible i
 | One-byte tampering tests (block, catalog, header, trailer, signature) | all rejected at the expected step |
 
 About 20 unclear points found during this check (a miscalculated LZMA2 dictionary limit, the base of the chunk reference delta, the length of encrypted store blocks, the signature key comparison, password normalization, and others) have all been fixed in this edition.
+
+## Appendix B. Priming data
+
+Version 1 of the priming data used by §6.4.11 is the file `prime/v1.txt` in the repository: 75,598 bytes, BLAKE3-256 `05f3a9a79ebd0a489559afc99ece7634838fe5b11aa13f84d5030cb693c1b1c2`. P = 1 always means this version; a later version would need a new codec id or flag. Decoders MUST use exactly these bytes. A decoder that cannot load them MUST reject primed blocks; archives without primed blocks do not need the file.
+
+It is UTF-8 text with LF line ends, written for this purpose: sample emails, notices, articles, stories, and instructions in English and Korean; shorter passages in Japanese, Chinese, Spanish, Portuguese, French, and German; source code in about twenty programming languages; and common data formats (JSON, XML, CSV, YAML, TOML, Markdown, log lines). It is part of this specification and is released under the same MIT license.

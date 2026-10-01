@@ -34,6 +34,8 @@ pub enum CodecChoice {
 pub struct CreateOptions {
     pub level: u8,
     pub codec: CodecChoice,
+    /// Fixed brain-fast model mask (testing); None lets the encoder choose per block.
+    pub brain_mask: Option<u16>,
     pub block_size: Option<usize>,
     pub threads: usize,
     pub password: Option<Vec<u8>>,
@@ -63,7 +65,11 @@ pub const MAX_LEVEL: u8 = 11;
 /// (plan, block size) for a level.
 /// 10 = `--max`: fast brain codec with 16 MiB blocks, so several cores work at once.
 /// 11 = smallest: full brain codec with 64 MiB blocks (slowest).
-pub fn level_params(level: u8, choice: CodecChoice) -> (Plan, usize) {
+pub fn level_params(level: u8, choice: CodecChoice, brain_mask: Option<u16>) -> (Plan, usize) {
+    let fast = match brain_mask {
+        Some(m) => Profile::FastMask(m),
+        None => Profile::Fast,
+    };
     let mib = |n: usize| n << 20;
     let (zl, lz, bs) = match level {
         1 => (1, 1, mib(4)),
@@ -83,11 +89,11 @@ pub fn level_params(level: u8, choice: CodecChoice) -> (Plan, usize) {
         CodecChoice::Zstd => Plan::Zstd(zl),
         CodecChoice::Lzma2 => Plan::Lzma2(lz),
         CodecChoice::Brain => Plan::Brain(Profile::Full),
-        CodecChoice::BrainFast => Plan::Brain(Profile::Fast),
+        CodecChoice::BrainFast => Plan::Brain(fast),
         CodecChoice::Auto => match level {
             0..=8 => Plan::Zstd(zl),
             9 => Plan::Auto { zstd: zl, lzma: lz },
-            10 => Plan::Brain(Profile::Fast),
+            10 => Plan::Brain(fast),
             _ => Plan::Brain(Profile::Full),
         },
     };
@@ -316,15 +322,29 @@ impl Producer {
     }
 }
 
-fn process_file(p: &mut Producer, it: &Item, hash_len: usize) -> Result<(Vec<u32>, Vec<u8>)> {
+/// Returns the chunk ids, the file hash, and the transform actually used.
+fn process_file(p: &mut Producer, it: &Item, hash_len: usize) -> Result<(Vec<u32>, Vec<u8>, u8)> {
     let mut f = File::open(&it.abs).with_context(|| format!("cannot open {}", it.abs.display()))?;
     let mut hasher = blake3::Hasher::new();
     let mut ids = Vec::new();
+    let mut used = it.transform;
     if it.transform != filter::XF_NONE || it.size <= WHOLE_READ_LIMIT {
         let mut buf = Vec::with_capacity(it.size as usize);
         f.read_to_end(&mut buf)?;
         hasher.update(&buf);
-        filter::encode(it.transform, &mut buf);
+        if used == filter::XF_X86_64 {
+            // Safety net: decoding must give back the exact input. It always should,
+            // but if it ever did not, fall back to the plain x86 transform.
+            let before = blake3::hash(&buf);
+            filter::encode(used, &mut buf);
+            filter::decode(used, &mut buf);
+            if blake3::hash(&buf) != before {
+                buf.clear();
+                File::open(&it.abs)?.read_to_end(&mut buf)?;
+                used = filter::XF_X86;
+            }
+        }
+        filter::encode(used, &mut buf);
         if !buf.is_empty() {
             for c in fastcdc::v2020::FastCDC::new(&buf, CDC_MIN, CDC_AVG, CDC_MAX) {
                 ids.push(p.add_chunk(&buf[c.offset..c.offset + c.length])?);
@@ -337,7 +357,7 @@ fn process_file(p: &mut Producer, it: &Item, hash_len: usize) -> Result<(Vec<u32
             ids.push(p.add_chunk(&c.data)?);
         }
     }
-    Ok((ids, hasher.finalize().as_bytes()[..hash_len].to_vec()))
+    Ok((ids, hasher.finalize().as_bytes()[..hash_len].to_vec(), used))
 }
 
 struct Sealed {
@@ -404,7 +424,7 @@ fn make_frame(
 
 pub fn create(out: &Path, inputs: &[PathBuf], o: &CreateOptions) -> Result<Stats> {
     let t0 = Instant::now();
-    let (plan, default_bs) = level_params(o.level, o.codec);
+    let (plan, default_bs) = level_params(o.level, o.codec, o.brain_mask);
     let block_size = o
         .block_size
         .unwrap_or(default_bs)
@@ -576,7 +596,7 @@ fn write_body(
     });
 
     let hash_len = o.hash_len as usize;
-    let mut file_data: Vec<Option<(Vec<u32>, Vec<u8>)>> = vec![None; items.len()];
+    let mut file_data: Vec<Option<(Vec<u32>, Vec<u8>, u8)>> = vec![None; items.len()];
     let mut produce_err = None;
     for &i in &order {
         let it = &items[i];
@@ -626,9 +646,9 @@ fn write_body(
             }
             ItemKind::File => {
                 st.files += 1;
-                let (chunks, hash) = file_data[i].take().unwrap();
+                let (chunks, hash, transform) = file_data[i].take().unwrap();
                 Kind::File {
-                    transform: it.transform,
+                    transform,
                     chunks,
                     hash,
                 }

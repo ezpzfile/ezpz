@@ -60,6 +60,9 @@ enum Cmd {
         /// Solid block size in MiB (default depends on level)
         #[arg(long)]
         block_size: Option<usize>,
+        /// (testing) fixed brain-fast model mask in hex, e.g. 0x1cb
+        #[arg(long, hide = true, value_parser = parse_hex_u16)]
+        brain_mask: Option<u16>,
         /// Encrypt (asks for a password, or uses --password / EZPZ_PASSWORD)
         #[arg(short, long)]
         encrypt: bool,
@@ -132,6 +135,9 @@ enum Cmd {
         archive: PathBuf,
         #[arg(long)]
         password: Option<String>,
+        /// Also list every block (codec, size before and after compression)
+        #[arg(long)]
+        blocks: bool,
     },
     /// Generate an Ed25519 signing key pair: NAME.key (secret) and NAME.pub
     Keygen { name: PathBuf },
@@ -144,7 +150,14 @@ enum Cmd {
         /// Use the fast profile (codec 4)
         #[arg(long)]
         fast: bool,
+        /// With --fast: fixed model mask in hex instead of the per-block choice
+        #[arg(long, value_parser = parse_hex_u16)]
+        mask: Option<u16>,
     },
+}
+
+fn parse_hex_u16(s: &str) -> Result<u16, String> {
+    u16::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|e| e.to_string())
 }
 
 /// Passwords are NFC-normalized UTF-8 (SPEC §13), so the same Hangul password typed on
@@ -243,6 +256,7 @@ fn run() -> Result<()> {
             max,
             codec,
             block_size,
+            brain_mask,
             encrypt,
             password,
             sign,
@@ -282,6 +296,7 @@ fn run() -> Result<()> {
                     CodecArg::Store => CodecChoice::Store,
                 },
                 block_size: block_size.map(|m| m << 20),
+                brain_mask,
                 threads,
                 password,
                 signing_key,
@@ -483,7 +498,7 @@ fn run() -> Result<()> {
             println!("result:    OK");
         }
 
-        Cmd::Info { archive, password } => {
+        Cmd::Info { archive, password, blocks } => {
             let ar = archive::Archive::open(&archive, &mut password_source(password, false), true)?;
             let h = &ar.header;
             println!(
@@ -523,6 +538,15 @@ fn run() -> Result<()> {
                 // codec comes from each frame header
                 let f = std::fs::File::open(&archive)?;
                 read_exact_at(&f, &mut fh, ar.block_offsets[i])?;
+                if blocks {
+                    let stored = u32::from_le_bytes([fh[12], fh[13], fh[14], fh[15]]);
+                    println!(
+                        "  block {i}: {} {} -> {}",
+                        codec_name(fh[4]),
+                        ar.table.blocks[i].raw_len,
+                        stored
+                    );
+                }
                 let e = per.entry(codec_name(fh[4])).or_insert((0u64, 0u64, 0u64));
                 e.0 += 1;
                 e.1 += ar.table.blocks[i].raw_len as u64;
@@ -561,8 +585,12 @@ fn run() -> Result<()> {
             let _ = ar.catalog_offset();
         }
 
-        Cmd::Tune { files, check, fast } => {
-            let profile = if fast { brain::Profile::Fast } else { brain::Profile::Full };
+        Cmd::Tune { files, check, fast, mask } => {
+            let profile = match (fast, mask) {
+                (false, _) => brain::Profile::Full,
+                (true, None) => brain::Profile::Fast,
+                (true, Some(m)) => brain::Profile::FastMask(m),
+            };
             use rayon::prelude::*;
             let res: Vec<(String, usize, f64, f64, bool, String)> = files
                 .par_iter()
