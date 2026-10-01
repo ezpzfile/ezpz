@@ -56,7 +56,7 @@ pub struct Stats {
     pub dedup_bytes: u64,
     pub archive_bytes: u64,
     pub blocks: u64,
-    pub codec_blocks: [u64; 5],
+    pub codec_blocks: [u64; 6],
     pub seconds: f64,
 }
 
@@ -322,6 +322,84 @@ impl Producer {
     }
 }
 
+/// Counts the bytes written through it (zstd trial output).
+struct ByteCount(u64);
+
+impl Write for ByteCount {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0 += b.len() as u64;
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// x86-64 programs get transform 4 from the classifier. It wins clearly on large programs and on
+/// several builds of the same program, but on a set of unrelated small libraries the in-place
+/// transform 3 can come out about 1.5% smaller. So all of them are compressed in storage order
+/// with fast zstd (long window), once each way, and the smaller result decides for the whole
+/// set (SPEC.md §15.1). The other files and the format are not affected.
+fn choose_x86_64_transform(items: &mut [Item], verbose: bool) {
+    let mut idx: Vec<usize> = (0..items.len())
+        .filter(|&i| matches!(items[i].kind, ItemKind::File) && items[i].transform == filter::XF_X86_64_SPLIT)
+        .collect();
+    if idx.is_empty() {
+        return;
+    }
+    // Same order as in write_body (class and transform are equal here).
+    idx.sort_by(|&a, &b| {
+        let k = |it: &Item| {
+            (
+                it.size,
+                classify::extension(&it.rel),
+                it.rel.rsplit('/').next().unwrap_or("").to_string(),
+                it.rel.clone(),
+            )
+        };
+        k(&items[a]).cmp(&k(&items[b]))
+    });
+    let total: u64 = idx.iter().map(|&i| items[i].size).sum();
+    let trial = || -> Result<(u64, u64)> {
+        let enc = || -> Result<zstd::stream::write::Encoder<'static, ByteCount>> {
+            let mut e = zstd::stream::write::Encoder::new(ByteCount(0), 1)?;
+            e.long_distance_matching(true)?;
+            e.window_log(26)?;
+            e.set_pledged_src_size(Some(total))?;
+            Ok(e)
+        };
+        let (mut a, mut b) = (enc()?, enc()?);
+        for &i in &idx {
+            let mut t4 = fs::read(&items[i].abs)?;
+            let mut t3 = t4.clone();
+            let (ra, rb) = rayon::join(
+                || {
+                    filter::encode(filter::XF_X86_64, &mut t3);
+                    a.write_all(&t3)
+                },
+                || {
+                    filter::encode(filter::XF_X86_64_SPLIT, &mut t4);
+                    b.write_all(&t4)
+                },
+            );
+            ra?;
+            rb?;
+        }
+        Ok((a.finish()?.0, b.finish()?.0))
+    };
+    // A file that cannot be read now fails later with a proper error; keep transform 4.
+    if let Ok((n3, n4)) = trial() {
+        if verbose {
+            eprintln!("x86-64 trial over {} files: transform 3 -> {n3}, transform 4 -> {n4} bytes", idx.len());
+        }
+        if n3 < n4 {
+            for &i in &idx {
+                items[i].transform = filter::XF_X86_64;
+            }
+        }
+    }
+}
+
 /// Returns the chunk ids, the file hash, and the transform actually used.
 fn process_file(p: &mut Producer, it: &Item, hash_len: usize) -> Result<(Vec<u32>, Vec<u8>, u8)> {
     let mut f = File::open(&it.abs).with_context(|| format!("cannot open {}", it.abs.display()))?;
@@ -332,19 +410,34 @@ fn process_file(p: &mut Producer, it: &Item, hash_len: usize) -> Result<(Vec<u32
         let mut buf = Vec::with_capacity(it.size as usize);
         f.read_to_end(&mut buf)?;
         hasher.update(&buf);
-        if used == filter::XF_X86_64 {
+        if used == filter::XF_X86_64_SPLIT || used == filter::XF_X86_64 {
             // Safety net: decoding must give back the exact input. It always should,
-            // but if it ever did not, fall back to the plain x86 transform.
+            // but if it ever did not, fall back to transform 3 and then to the plain
+            // x86 transform, which is reversible for any input.
             let before = blake3::hash(&buf);
-            filter::encode(used, &mut buf);
-            filter::decode(used, &mut buf);
-            if blake3::hash(&buf) != before {
+            let mut chain = vec![used];
+            if used == filter::XF_X86_64_SPLIT {
+                chain.push(filter::XF_X86_64);
+            }
+            used = filter::XF_X86;
+            for xf in chain {
+                filter::encode(xf, &mut buf);
+                let encoded = buf.clone();
+                filter::decode(xf, &mut buf);
+                if blake3::hash(&buf) == before {
+                    buf = encoded;
+                    used = xf;
+                    break;
+                }
                 buf.clear();
                 File::open(&it.abs)?.read_to_end(&mut buf)?;
-                used = filter::XF_X86;
             }
+            if used == filter::XF_X86 {
+                filter::encode(used, &mut buf);
+            }
+        } else {
+            filter::encode(used, &mut buf);
         }
-        filter::encode(used, &mut buf);
         if !buf.is_empty() {
             for c in fastcdc::v2020::FastCDC::new(&buf, CDC_MIN, CDC_AVG, CDC_MAX) {
                 ids.push(p.add_chunk(&buf[c.offset..c.offset + c.length])?);
@@ -403,7 +496,7 @@ fn make_frame(
     archive_id: &[u8; 16],
     counter: u64,
 ) -> Result<Vec<u8>> {
-    let (codec, payload) = codec::compress(raw, Plan::Zstd(19))?;
+    let (codec, payload) = codec::compress_index(raw)?;
     let stored_len = payload.len() + if key.is_some() { 16 } else { 0 };
     let fh = FrameHeader {
         magic,
@@ -464,6 +557,9 @@ pub fn create(out: &Path, inputs: &[PathBuf], o: &CreateOptions) -> Result<Stats
             it.class = c;
             it.transform = xf;
         });
+    if o.level >= 4 {
+        choose_x86_64_transform(&mut items, o.verbose);
+    }
 
     // Header
     let mut archive_id = [0u8; 16];
@@ -526,10 +622,10 @@ fn write_body(
     let threads = o.threads.max(1);
     let (tx, rx) = mpsc::sync_channel::<RawBlock>(threads * 2);
     let header_len = header.bytes.len() as u64;
-    let worker = std::thread::spawn(move || -> Result<(BufWriter<File>, Vec<BlockEntry>, Vec<Vec<u32>>, [u64; 5], u64)> {
+    let worker = std::thread::spawn(move || -> Result<(BufWriter<File>, Vec<BlockEntry>, Vec<Vec<u32>>, [u64; 6], u64)> {
         let mut entries = Vec::new();
         let mut lens_all = Vec::new();
-        let mut counts = [0u64; 5];
+        let mut counts = [0u64; 6];
         let mut offset = header_len;
         let mut done = false;
         while !done {
@@ -551,7 +647,7 @@ fn write_body(
                 let s = s?;
                 w.write_all(&s.frame)?;
                 offset += s.frame.len() as u64;
-                counts[s.codec.min(4) as usize] += 1;
+                counts[s.codec.min(5) as usize] += 1;
                 entries.push(s.entry);
                 lens_all.push(b.lens);
             }

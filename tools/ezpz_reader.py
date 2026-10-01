@@ -4,14 +4,18 @@ Codec 4 (brain-fast, §6.5) was added later, also from SPEC.md alone; it was the
 ezpz 0.3.0 layout (2-byte model mask, any subset of models 0..8), together with transform 3
 (x86-64, §9), again from SPEC.md alone. The priming flag P (§6.4.1 byte 0 bit 7) and priming
 (§6.4.11, Appendix B; codec 4 per §6.5) were added later, again from SPEC.md alone.
+Codec 5 (zstd-primed, §6.6: zstd with the priming data D as a raw content dictionary) and
+transform 4 (x86-64 split, §9) were added later, again from SPEC.md alone, and then aligned with the
+revised §6.6/§9 text (a frame is rejected only for a nonzero dictionary ID).
 
 usage: reader.py ARCHIVE [--out DIR] [--compare DIR --sub SUB] [--pub HEXFILE]
-                 [--password PW] [--brain-impl fast|ref] [--prime FILE]
+                 [--password PW] [--brain-impl fast|ref] [--prime FILE] [--split-impl fast|ref]
 
 Without --password, an encrypted archive is verified as far as the spec allows
 without the key (§14: steps 1-7 + every block hash) and then stops.
 """
 import os
+import re
 import sys
 import struct
 import argparse
@@ -257,21 +261,24 @@ class PrimingDataError(FormatError):
 
 def priming_data():
     """Appendix B: version 1 of the priming data D (prime/v1.txt). Loaded once, and checked against
-    the stated size and BLAKE3-256 before first use ("Decoders MUST use exactly these bytes")."""
+    the stated size and BLAKE3-256 before first use ("Decoders MUST use exactly these bytes").
+    Used by brain blocks with P = 1 (§6.4.11) and by codec 5 (§6.6); a decoder that cannot load D
+    MUST reject those blocks (Appendix B), which the PrimingDataError below does."""
     path = OPTS["prime"]
     if path not in _PRIME_CACHE:
+        refuse = "refusing to decode a primed block (P=1 or codec 5)"
         try:
             with open(path, "rb") as fh:
                 d = fh.read()
         except OSError as ex:
-            raise PrimingDataError(f"priming data (Appendix B): cannot read {path}: {ex}")
+            raise PrimingDataError(f"priming data (Appendix B): cannot read {path}: {ex}; {refuse}")
         if len(d) != PRIME_V1_LEN:
             raise PrimingDataError(f"priming data (Appendix B): {path} is {len(d)} bytes, expected "
-                                   f"{PRIME_V1_LEN}; refusing to decode a primed (P=1) block")
+                                   f"{PRIME_V1_LEN}; {refuse}")
         h = b3(d).hex()
         if h != PRIME_V1_BLAKE3:
             raise PrimingDataError(f"priming data (Appendix B): {path} has BLAKE3 {h}, expected "
-                                   f"{PRIME_V1_BLAKE3}; refusing to decode a primed (P=1) block")
+                                   f"{PRIME_V1_BLAKE3}; {refuse}")
         log(f"    priming data: {path} ({len(d)} bytes, size and BLAKE3 match Appendix B)")
         _PRIME_CACHE[path] = d
     return _PRIME_CACHE[path]
@@ -786,28 +793,131 @@ def brain_decode_fast(payload, raw_len, codec=3):
 
 
 BRAIN_IMPL = {"fast": brain_decode_fast, "ref": brain_decode_ref}
-OPTS = {"brain": "fast", "prime": PRIME_DEFAULT}
+OPTS = {"brain": "fast", "prime": PRIME_DEFAULT, "split": "fast"}
 
 
 # ---------------------------------------------------------------- codecs (§6)
-def decompress(codec, payload, raw_len, what, index=False):
-    if index:
-        need(codec in (0, 1, 2), f"{what}: index frame codec {codec} not allowed")
-    if codec == 0:
-        need(len(payload) == raw_len, f"{what}: store payload length != raw_len")
-        return bytes(payload)
-    if codec == 1:
-        d = zstandard.ZstdDecompressor(max_window_size=1 << 28)
-        r = d.stream_reader(bytes(payload), read_across_frames=True)
-        parts, total = [], 0
-        while total <= raw_len:
+def zstd_decode(payload, raw_len, what, dict_data=None):
+    """§6.2: one or more RFC 8878 frames (skippable frames allowed), window <= 2^28, total decoded
+    length == raw_len. With dict_data (codec 5, §6.6) libzstd references the dictionary for every
+    frame (ZSTD_DCtx_refDDict), so each frame starts from D, not from the previous frame's output."""
+    d = zstandard.ZstdDecompressor(dict_data=dict_data, max_window_size=1 << 28)
+    r = d.stream_reader(bytes(payload), read_across_frames=True)
+    parts, total = [], 0
+    try:
+        while total <= raw_len:      # reading raw_len + 1 bytes is enough to detect a longer output
             piece = r.read(1 << 20)
             if not piece:
                 break
             parts.append(piece)
             total += len(piece)
-        out = b"".join(parts)
-        need(len(out) == raw_len, f"{what}: zstd output {len(out)} != raw_len {raw_len}")
+    except zstandard.ZstdError as ex:
+        raise FormatError(f"{what}: zstd decoding failed: {ex}")
+    out = b"".join(parts)
+    need(len(out) == raw_len, f"{what}: zstd output {len(out)} != raw_len {raw_len}")
+    return out
+
+
+def zstd_frames(payload, what):
+    """Walks the RFC 8878 frames of a zstd payload (frame headers and block headers only; libzstd
+    does the decoding). Returns one dict per frame. Used for codec 5, where §6.6 makes decoders
+    reject a frame with a nonzero dictionary ID."""
+    b = bytes(payload)
+    n = len(b)
+    p = 0
+    frames = []
+    while p < n:
+        need(p + 4 <= n, f"{what}: truncated zstd frame magic")
+        magic = int.from_bytes(b[p:p + 4], "little")
+        if magic & 0xFFFFFFF0 == 0x184D2A50:                  # skippable frame (RFC 8878 §3.1.2)
+            need(p + 8 <= n, f"{what}: truncated skippable frame header")
+            size = int.from_bytes(b[p + 4:p + 8], "little")
+            need(p + 8 + size <= n, f"{what}: skippable frame runs past the payload")
+            frames.append(dict(skippable=True, size=size))
+            p += 8 + size
+            continue
+        need(magic == 0xFD2FB528, f"{what}: not a zstd frame (magic {magic:#010x} at {p})")
+        need(p + 5 <= n, f"{what}: truncated zstd frame header")
+        fhd = b[p + 4]
+        fcs_flag, single, checksum, did_flag = fhd >> 6, (fhd >> 5) & 1, (fhd >> 2) & 1, fhd & 3
+        need(fhd & 0x08 == 0, f"{what}: zstd frame header reserved bit set")
+        q = p + 5
+        window = None
+        if not single:                                        # Window_Descriptor
+            need(q < n, f"{what}: truncated zstd window descriptor")
+            wbase = 1 << (10 + (b[q] >> 3))
+            window = wbase + (wbase >> 3) * (b[q] & 7)
+            q += 1
+        dsz = (0, 1, 2, 4)[did_flag]
+        fsz = (single, 2, 4, 8)[fcs_flag]
+        need(q + dsz + fsz <= n, f"{what}: truncated zstd frame header")
+        did = int.from_bytes(b[q:q + dsz], "little")
+        q += dsz
+        fcs = int.from_bytes(b[q:q + fsz], "little") + (256 if fsz == 2 else 0) if fsz else None
+        q += fsz
+        if single:
+            window = fcs                                      # Window_Size = Frame_Content_Size
+        nblocks = 0
+        while True:                                           # blocks (RFC 8878 §3.1.1.2)
+            need(q + 3 <= n, f"{what}: truncated zstd block header")
+            bh = int.from_bytes(b[q:q + 3], "little")
+            btype = (bh >> 1) & 3
+            need(btype != 3, f"{what}: reserved zstd block type")
+            q += 3 + (1 if btype == 1 else bh >> 3)
+            need(q <= n, f"{what}: zstd block runs past the payload")
+            nblocks += 1
+            if bh & 1:
+                break
+        if checksum:
+            q += 4
+            need(q <= n, f"{what}: truncated zstd content checksum")
+        frames.append(dict(skippable=False, single=single, window=window, did_flag=did_flag, did=did,
+                           fcs=fcs, checksum=checksum, blocks=nblocks, size=q - p))
+        p = q
+    return frames
+
+
+_ZDICT_CACHE = {}
+
+
+def primed_zstd_dict():
+    """§6.6: D (Appendix B, loaded and checked by priming_data) as a RAW CONTENT dictionary
+    (ZSTD_dct_rawContent), never parsed as a formatted dictionary."""
+    D = priming_data()
+    path = OPTS["prime"]
+    if path not in _ZDICT_CACHE:
+        _ZDICT_CACHE[path] = zstandard.ZstdCompressionDict(D, dict_type=zstandard.DICT_TYPE_RAWCONTENT)
+    return _ZDICT_CACHE[path]
+
+
+def decompress(codec, payload, raw_len, what, index=False):
+    if index:                       # §5: index frames use codec 0, 1 or 2 (so never 3, 4 or 5, §6.6)
+        need(codec in (0, 1, 2), f"{what}: index frame codec {codec} not allowed")
+    if codec == 0:
+        need(len(payload) == raw_len, f"{what}: store payload length != raw_len")
+        return bytes(payload)
+    if codec == 1:
+        return zstd_decode(payload, raw_len, what)
+    if codec == 5:                  # zstd-primed (§6.6); data blocks only
+        zdict = primed_zstd_dict()  # PrimingDataError if D cannot be loaded: §6.6 "MUST fail when it
+        #                             has to decode a codec 5 block" (Appendix B: reject primed blocks)
+        frames = zstd_frames(payload, what)
+        for k, fr in enumerate(frames):
+            if fr["skippable"]:
+                continue
+            # §6.6: "Decoders MUST reject a frame with a nonzero dictionary ID." A Dictionary_ID field
+            # that is present but holds 0 means "no ID" (RFC 8878) and is accepted. libzstd would also
+            # reject a nonzero ID by itself ("Dictionary mismatch"); checking here names the rule.
+            need(fr["did"] == 0,
+                 f"{what}: codec 5 frame {k} has dictionary ID {fr['did']} (Dictionary_ID_flag="
+                 f"{fr['did_flag']}); §6.6: decoders MUST reject a nonzero dictionary ID")
+        out = zstd_decode(payload, raw_len, what, dict_data=zdict)
+        desc = ", ".join("skippable" if fr["skippable"] else
+                         f"{'single-segment ' if fr['single'] else ''}window={fr['window']} "
+                         f"fcs={fr['fcs']} blocks={fr['blocks']}{' +checksum' if fr['checksum'] else ''}"
+                         f"{' +dictID-field(0)' if fr['did_flag'] else ''}"
+                         for fr in frames)
+        log(f"    zstd-primed: D = {PRIME_V1_LEN}-byte raw content dictionary; {len(frames)} frame(s): {desc}")
         return out
     if codec == 2:
         need(len(payload) >= 1, f"{what}: lzma2 empty")
@@ -968,7 +1078,135 @@ def x86_64(buf, encode):
     return bytes(buf), calls, rips
 
 
-TRANSFORMS = (0, 1, 2, 3)          # §9 table
+# §9 transform 4 (x86-64 split): CALL (E8) and the RIP-relative patterns of transform 3; E9 is an
+# ordinary byte (its operand bytes are scanned like any other code). Every matched field moves to the
+# end of the file, big-endian, last field first; fields in [-2^B, 2^B) are first made absolute.
+def split_bits(n):
+    """§9: B = the smallest number from 23 to 31 with 2^B >= n (n = the file length), or 31 if
+    there is none."""
+    B = 23
+    while B < 31 and (1 << B) < n:
+        B += 1
+    return B
+
+
+def split_in_range(v, B):
+    """§9 convB's test: v (u32) read as a signed 32-bit number lies in [-2^B, 2^B)."""
+    return (v >> B) == 0 or (v >> B) == (M32 >> B)
+
+
+def convB(v, pos, encode, B):
+    """§9 convB: u32 arithmetic, pos taken modulo 2^32. At B = 31 every value is in range, m is
+    0xFFFFFFFF and the sign extension changes nothing."""
+    if split_in_range(v, B):
+        m = M32 >> (31 - B)                               # the low B+1 bits
+        r = ((v + pos) if encode else (v - pos)) & m
+        if r >> B:
+            r |= M32 ^ m                                  # sign-extend from bit B
+        return r
+    return v
+
+
+def split_field(buf, i, end):
+    """§9 field(): offset of the address field of a pattern at i, or None. E9 starts no pattern."""
+    c = buf[i]
+    if c == 0xE8:
+        return i + 1
+    j = i
+    if c == 0x66 or c == 0xF2 or c == 0xF3:
+        j += 1
+    if j < end and (buf[j] & 0xF0) == 0x40:
+        j += 1
+    if j + 7 <= end and buf[j] == 0x0F and buf[j + 1] in OP2_X64 and (buf[j + 2] & 0xC7) == 0x05:
+        return j + 3
+    if j + 6 <= end and buf[j] in OP1_X64 and (buf[j + 1] & 0xC7) == 0x05:
+        return j + 2
+    return None
+
+
+def x86_64_split_decode_ref(t):
+    """§9 split_decode, transcribed line by line (one Python step per byte: slow, but easy to audit).
+    Returns (original bytes, fields moved back, fields converted by convB, B)."""
+    n = len(t)
+    B = split_bits(n)
+    out = bytearray()
+    q = 0
+    T = n                                     # end of the bytes not used yet
+    nf = conv = 0
+    while q + 5 <= T:
+        f = split_field(t, q, T)
+        if f is None:
+            out.append(t[q])
+            q += 1
+            continue
+        pos = len(out)                        # where the pattern starts in the original file
+        out += t[q:f]
+        w = int.from_bytes(t[T - 4:T], "big")
+        T -= 4
+        conv += split_in_range(w, B)
+        out += convB(w, pos & M32, False, B).to_bytes(4, "little")
+        q = f
+        nf += 1
+    out += t[q:T]
+    return bytes(out), nf, conv, B
+
+
+def _byte_class(values):
+    return b"[" + b"".join(b"\\x%02x" % v for v in sorted(values)) + b"]"
+
+
+RIP_MODRM = [v for v in range(256) if v & 0xC7 == 0x05]          # mod = 00, r/m = 101
+# One match = one pattern of field(), from its first byte up to (not including) its address field:
+# E8 | [one legacy prefix][REX] (0F OP2 ModRM | OP1 ModRM). field() takes the prefix and the REX
+# byte whenever they are present; the regex may also try without them, but 66/F2/F3 and 40..4F are
+# neither 0F nor in OP1, so that never yields another match. Bounds are left to the caller.
+SPLIT_PATTERN = re.compile(
+    b"\\xe8|[\\x66\\xf2\\xf3]?[\\x40-\\x4f]?(?:\\x0f" + _byte_class(OP2_X64) + _byte_class(RIP_MODRM)
+    + b"|" + _byte_class(OP1_X64) + _byte_class(RIP_MODRM) + b")")
+
+
+def x86_64_split_decode(t):
+    """§9 split_decode, restructured for CPython speed and cross-checked against
+    x86_64_split_decode_ref. split_decode walks the code part of t from the front, one byte at a time
+    or from a pattern start to its field offset f, which is exactly how finditer moves, so the
+    regex finds the same pattern starts. The bounds: a match at s counts only if s + 5 <= T (loop
+    condition) and f + 4 <= T (field()'s j + 7 / j + 6 checks, and E8's loop condition). Once either
+    fails, nothing later can match (any pattern starting inside s..f has its field at f too), so the
+    rest, t[q:T], is copied as split_decode's single-byte steps and final copy would do."""
+    n = len(t)
+    B = split_bits(n)
+    m = M32 >> (31 - B)                       # convB's mask: the low B+1 bits
+    ext = M32 ^ m
+    top = M32 >> B
+    src = memoryview(t)
+    get_be = struct.Struct(">I").unpack_from
+    put_le = struct.Struct("<I").pack
+    out = bytearray()
+    q = 0
+    T = n
+    nf = conv = 0
+    for mt in SPLIT_PATTERN.finditer(t):
+        s, f = mt.span()
+        if s + 5 > T or f + 4 > T:
+            break
+        out += src[q:f]
+        w = get_be(t, T - 4)[0]
+        T -= 4
+        h = w >> B
+        if h == 0 or h == top:                # convB(w, pos, false); pos = len(out) at s = s + 4*nf
+            w = (w - s - 4 * nf) & m
+            if w >> B:
+                w |= ext
+            conv += 1
+        out += put_le(w)
+        nf += 1
+        q = f
+    out += src[q:T]
+    return bytes(out), nf, conv, B
+
+
+SPLIT_IMPL = {"fast": x86_64_split_decode, "ref": x86_64_split_decode_ref}
+TRANSFORMS = (0, 1, 2, 3, 4)       # §9 table
 
 
 # ---------------------------------------------------------------- path rules (§8)
@@ -1181,7 +1419,7 @@ def read_archive(path, pubhex=None, chunkref_mode="global", password=None):
     links = [i for i in range(m) if types[i] == 2]
     f = len(files)
     transforms = [cr.u8() for _ in range(f)]
-    for tf in transforms:                            # §9 ids 0..3; anything else is not understood (§17)
+    for tf in transforms:                            # §9 ids 0..4; anything else is not understood (§17)
         need(tf in TRANSFORMS, f"unknown transform id {tf}")
     nchunks = [cr.varint() for _ in range(f)]
     refs = []
@@ -1252,6 +1490,10 @@ def read_archive(path, pubhex=None, chunkref_mode="global", password=None):
             content, calls, rips = x86_64(content, False)
             log(f"    {spaths[i]}: undid x86-64 transform ({calls} E8/E9 operands, "
                 f"{rips} RIP-relative displacements rewritten)")
+        elif tf == 4:
+            content, nf, conv, B = SPLIT_IMPL[OPTS["split"]](content)
+            log(f"    {spaths[i]}: undid x86-64 split transform [{OPTS['split']}] (B={B}: {nf} address "
+                f"fields moved back from the end, {conv} of them converted)")
         else:
             need(tf == 0, f"unknown transform {tf}")
         if hash_len:
@@ -1356,11 +1598,14 @@ def main():
     ap.add_argument("--chunkref", default="global", choices=["global", "perfile"])
     ap.add_argument("--brain-impl", default="fast", choices=["fast", "ref"])
     ap.add_argument("--prime", default=PRIME_DEFAULT,
-                    help="priming data file for P=1 brain blocks (Appendix B; default: ../prime/v1.txt "
-                         "relative to this script). Size and BLAKE3 are checked before use.")
+                    help="priming data file for P=1 brain blocks and codec 5 (Appendix B; default: "
+                         "../prime/v1.txt relative to this script). Size and BLAKE3 are checked before use.")
+    ap.add_argument("--split-impl", default="fast", choices=["fast", "ref"],
+                    help="transform 4 decoder: regex-driven (fast) or the literal §9 transcription (ref)")
     a = ap.parse_args()
     OPTS["brain"] = a.brain_impl
     OPTS["prime"] = a.prime
+    OPTS["split"] = a.split_impl
     pub = open(a.pub).read().strip() if a.pub else None
     try:
         entries = read_archive(a.archive, pub, a.chunkref, a.password)

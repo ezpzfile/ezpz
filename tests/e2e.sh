@@ -19,6 +19,9 @@ for i in $(seq 1 300); do echo "line $i: the quick brown fox jumps over the lazy
 head -c 300000 /dev/urandom > src/random.bin
 cp src/text.txt src/deep/er/copy.txt
 cp "$(command -v ls)" src/prog
+# a small synthetic x86-64 ELF file (CALL and RIP-relative patterns), so transform 4 runs on any host
+{ printf '\x7fELF\x02\x01\x01'; head -c 9 /dev/zero; printf '\x02\x00\x3e\x00'
+  for i in $(seq 1 2000); do printf '\xe8\x10\x20\x00\x00\x48\x8b\x05\x00\x01\x00\x00\x90'; done; } > src/prog64
 : > src/empty
 echo "안녕하세요" > src/한글폴더/인사.txt
 ln -s ../text.txt src/deep/link
@@ -39,6 +42,11 @@ done
 rm -rf out; "$B" c m.ezpz src --codec brain-fast --brain-mask 0x155 >/dev/null 2>&1 && "$B" x m.ezpz -C out >/dev/null 2>&1 \
   && diff -r -x escape src out/src >/dev/null && ok "brain-fast with an unusual model mask" || bad "brain-fast with an unusual model mask"
 s1=$(stat -c %s a6.ezpz); [ "$s1" -lt 4000000 ] && ok "dedup stores repeated 3MB once ($s1 bytes)" || bad "dedup ($s1 bytes)"
+"$B" info a1.ezpz | grep -q "x86-64 split" && ok "x86-64 file gets transform 4 at level 1" || bad "x86-64 file gets transform 4 at level 1"
+mkdir -p small; cp src/text.txt small/
+rm -rf out; "$B" c sp.ezpz small >/dev/null 2>&1 && "$B" info sp.ezpz | grep -q "zstd-primed" \
+  && "$B" x sp.ezpz -C out >/dev/null 2>&1 && diff -r small out/small >/dev/null \
+  && ok "small text file uses zstd-primed (codec 5) and round-trips" || bad "small text file uses zstd-primed (codec 5) and round-trips"
 
 echo "[random access]"
 [ "$("$B" cat a6.ezpz src/한글폴더/인사.txt)" = "안녕하세요" ] && ok "cat unicode path" || bad "cat unicode path"

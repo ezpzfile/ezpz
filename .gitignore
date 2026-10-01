@@ -2,4 +2,6 @@ target/
 bench/data/
 bench/out/
 bench/tmp/
-.DS_Store
+testvectors/input-x64big/
+bench/small/
+__pycache__/

@@ -2,7 +2,7 @@
 
 English | [한국어](README.ko.md)
 
-`.ezpz` is an archive format in the same family as zip and 7z: it packs many files into one and compresses them. It combines proven compressors (zstd and LZMA2) with content-defined deduplication, solid blocks, encryption, and signatures. For maximum compression it adds a codec of its own, the brain codec, which predicts every bit before coding it and keeps learning as it goes. `--max` uses its fast version and `-l 11` its full version. Both start from built-in knowledge of common text, code, and data, which helps small files most.
+`.ezpz` is an archive format in the same family as zip and 7z: it packs many files into one and compresses them. It combines proven compressors (zstd and LZMA2) with content-defined deduplication, solid blocks, encryption, and signatures. For maximum compression it adds a codec of its own, the brain codec, which predicts every bit before coding it and keeps learning as it goes. `--max` uses its fast version and `-l 11` its full version. Both start from built-in knowledge of common text, code, and data, which helps small files most, and the zstd levels use the same knowledge as a dictionary. For programs, ezpz can move call and data addresses out of the machine code (like 7z's BCJ2), so similar code compresses as one long match even across different builds.
 
 - Specification: [SPEC.md](SPEC.md)
 - Benchmark: [BENCHMARK.md](BENCHMARK.md)
@@ -17,9 +17,9 @@ Archive sizes from the two brain codec settings, next to the best settings of xz
 | Silesia corpus | 211.9 MB | 48.4 MB | 48.7 MB | 43.2 MB (10.9% smaller than xz -9e) | **41.8 MB** (13.6% smaller than xz -9e) |
 | Python install folder | 53.2 MB | 9.1 MB | 9.1 MB | 9.0 MB (0.8% smaller than 7z -mx9) | **7.9 MB** (12.7% smaller than 7z -mx9) |
 | Backup of three Python versions | 158.2 MB | 24.3 MB | 23.7 MB | 26.4 MB (11.5% larger than 7z -mx9) | **23.1 MB** (2.6% smaller than 7z -mx9) |
-| Linux executables | 104.9 MB | 23.1 MB | **20.9 MB** | 23.8 MB (14.0% larger than 7z -mx9) | 22.2 MB (6.0% larger than 7z -mx9) |
+| Linux executables | 104.9 MB | 23.1 MB | 20.9 MB | 22.3 MB (6.8% larger than 7z -mx9) | **19.8 MB** (5.1% smaller than 7z -mx9) |
 
-On text, `--max` keeps most of the lead. On program files and backups it ends up about as large as 7z or larger, and `-l 11` is the setting that stays ahead. Small files show the biggest gap: across 15 files of 4 to 35 KB, `--max` is 19.9% smaller than xz -9e and 26.4% smaller than zip -9. The default level produces archives about the size of tar.zst -19 and can pull a single file out in under 0.1 s. The full numbers are in [BENCHMARK.md](BENCHMARK.md).
+On text, `--max` keeps most of the lead. On program files and backups it ends up about as large as 7z or larger, and `-l 11` is the setting that stays ahead, now on executables too. Small files show the biggest gap: across 15 files of 4 to 35 KB, `--max` is 19.9% smaller than xz -9e and 26.4% smaller than zip -9, and even the default level is 7.5% smaller than zip -9. The default level produces archives about the size of tar.zst -19 and can pull a single file out in under 0.1 s. The full numbers are in [BENCHMARK.md](BENCHMARK.md).
 
 ## Build
 
@@ -81,21 +81,22 @@ Other useful options: `-j N` (number of threads), `--block-size MiB`, `--codec z
 | `src/index.rs` | encoding and decoding of the block table and the catalog (a column-oriented index) |
 | `src/codec.rs` | glue for the store, zstd, LZMA2, and brain codecs |
 | `src/brain.rs` | brain codecs: context models (9, or 6 in brain-fast), a match model, neural mixers, APM stages, and an arithmetic coder |
-| `src/filter.rs` | executable transforms (x86 E8/E9, x86-64 with RIP-relative addresses, ARM64 BL) |
+| `src/filter.rs` | executable transforms (x86 E8/E9, x86-64 with RIP-relative addresses in place or moved to the end of the file, ARM64 BL) |
 | `src/classify.rs` | file classification (executable / already compressed / other) |
 | `src/create.rs` | archiver: classify, sort, split into content-defined chunks, deduplicate, compress blocks in parallel |
 | `src/archive.rs` | extractor: verification, block cache, random access, safe extraction |
 | `src/crypto.rs` | Argon2id and XChaCha20-Poly1305 |
-| `prime/v1.txt` | built-in priming data for the brain codecs (part of the format) |
+| `prime/v1.txt` | built-in priming data for the brain codecs and the zstd dictionary (part of the format) |
 
 ## Independent implementation
 
-`tools/ezpz_reader.py` is a Python decoder written only from SPEC.md, without looking at the Rust code. Support for brain-fast, the x86-64 transform, and priming was added the same way, from the specification alone. Decoding the archives in `testvectors/` with it and comparing the output with the original files shows that the specification alone is enough to build a compatible implementation.
+`tools/ezpz_reader.py` is a Python decoder written only from SPEC.md, without looking at the Rust code. Support for brain-fast, the x86-64 transforms, priming, and zstd with the priming dictionary was added the same way, from the specification alone. Decoding the archives in `testvectors/` with it and comparing the output with the original files shows that the specification alone is enough to build a compatible implementation.
 
 ```bash
 pip install zstandard blake3 cryptography
 python3 tools/ezpz_reader.py testvectors/brain.ezpz --out /tmp/out --compare testvectors/input --sub input
 python3 tools/ezpz_reader.py testvectors/brain-fast.ezpz --out /tmp/out2 --compare testvectors/input --sub input
+python3 tools/ezpz_reader.py testvectors/x86-64-split.ezpz --out /tmp/out3 --compare testvectors/input-x64 --sub input-x64
 python3 tools/ezpz_reader.py testvectors/signed.ezpz --pub testvectors/k.pub
 ```
 
@@ -111,8 +112,8 @@ tests/e2e.sh              # end-to-end CLI scenarios: round trips, tampering, en
 ## Limitations
 
 - The brain codecs are slow in both directions. `--max` runs at about 2 MB/s on a 2-core server and about 5 MB/s on a 4-core Mac, and `-l 11` is 1.6 to 4 times slower. Extracting one file means decoding the whole block that holds it (16 MB with `--max`, 64 MB with `-l 11`). That is why the default level uses zstd.
-- `--max` trades size for speed. On program files and backups it is 8 to 15% larger than `-l 11`: about the same as 7z on the Python folder, and larger than 7z on the backup and the executables. For the smallest archive of such data, use `-l 11`.
-- 7z still makes smaller archives of executables, by about 6% against `-l 11`. ezpz has nothing as elaborate as 7z's x86 preprocessor (BCJ2) yet.
+- `--max` trades size for speed. On program files and backups it is 13 to 15% larger than `-l 11`: about the same as 7z on the Python folder, and larger than 7z on the backup and the executables. For the smallest archive of such data, use `-l 11`.
+- On executables, 7z still beats the zstd and LZMA2 levels (`-l 9` is 1.7% larger). Only `-l 11` makes them smaller than 7z does.
 - Already-compressed data (jpg, mp4, zip, ...) barely shrinks with any method. ezpz recognizes such files and stores them as they are, which saves time.
 - Hash checks on an unsigned archive catch accidental damage such as transfer or disk errors. To detect deliberate changes too, sign the archive with `--sign` and have the recipient run `verify --pubkey`. When a public key is given, unsigned files are rejected.
 - This is a v1 draft and the format may still change. Do not use it as the only copy of important data.

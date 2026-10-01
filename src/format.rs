@@ -36,6 +36,7 @@ pub const CODEC_ZSTD: u8 = 1;
 pub const CODEC_LZMA2: u8 = 2;
 pub const CODEC_BRAIN: u8 = 3;
 pub const CODEC_BRAIN_FAST: u8 = 4;
+pub const CODEC_ZSTD_PRIMED: u8 = 5;
 
 pub fn codec_name(c: u8) -> &'static str {
     match c {
@@ -44,6 +45,7 @@ pub fn codec_name(c: u8) -> &'static str {
         CODEC_LZMA2 => "lzma2",
         CODEC_BRAIN => "brain",
         CODEC_BRAIN_FAST => "brain-fast",
+        CODEC_ZSTD_PRIMED => "zstd-primed",
         _ => "unknown",
     }
 }

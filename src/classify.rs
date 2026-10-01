@@ -1,7 +1,7 @@
 //! Encoder-side heuristics: group similar files, skip already-compressed data,
 //! detect machine code. None of this is needed to *read* an archive.
 
-use crate::filter::{XF_ARM64, XF_NONE, XF_X86, XF_X86_64};
+use crate::filter::{XF_ARM64, XF_NONE, XF_X86, XF_X86_64_SPLIT};
 use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -113,7 +113,7 @@ fn detect_exec(s: &[u8]) -> Option<u8> {
         };
         return Some(match m {
             0x03 => XF_X86,
-            0x3E => XF_X86_64,
+            0x3E => XF_X86_64_SPLIT,
             0xB7 => XF_ARM64,
             _ => XF_NONE,
         });
@@ -121,7 +121,7 @@ fn detect_exec(s: &[u8]) -> Option<u8> {
     if s.len() >= 8 && (s[..4] == [0xCF, 0xFA, 0xED, 0xFE] || s[..4] == [0xCE, 0xFA, 0xED, 0xFE]) {
         let cpu = u32::from_le_bytes([s[4], s[5], s[6], s[7]]);
         return Some(match (cpu, cpu & 0x00FF_FFFF) {
-            (0x0100_0007, _) => XF_X86_64,
+            (0x0100_0007, _) => XF_X86_64_SPLIT,
             (_, 7) => XF_X86,
             (_, 12) => XF_ARM64,
             _ => XF_NONE,
@@ -133,7 +133,7 @@ fn detect_exec(s: &[u8]) -> Option<u8> {
             let m = u16::from_le_bytes([s[e + 4], s[e + 5]]);
             return Some(match m {
                 0x014C => XF_X86,
-                0x8664 => XF_X86_64,
+                0x8664 => XF_X86_64_SPLIT,
                 0xAA64 => XF_ARM64,
                 _ => XF_NONE,
             });

@@ -3,63 +3,63 @@
 {"file": "c_header.h", "raw": 34649, "method": "zstd -19", "size": 6525}
 {"file": "c_header.h", "raw": 34649, "method": "xz -9e", "size": 6476}
 {"file": "c_header.h", "raw": 34649, "method": "7z -mx9", "size": 6566}
-{"file": "c_header.h", "raw": 34649, "method": "ezpz (default -l 7)", "size": 6775}
-{"file": "c_header.h", "raw": 34649, "method": "ezpz --max (-l 10)", "size": 5062}
-{"file": "c_header.h", "raw": 34649, "method": "ezpz -l 11", "size": 4985}
+{"file": "c_header.h", "raw": 34649, "method": "ezpz (default -l 7)", "size": 6338}
+{"file": "c_header.h", "raw": 34649, "method": "ezpz --max (-l 10)", "size": 5061}
+{"file": "c_header.h", "raw": 34649, "method": "ezpz -l 11", "size": 4984}
 {"file": "data.json", "raw": 24000, "method": "zip -9", "size": 3839}
 {"file": "data.json", "raw": 24000, "method": "gzip -9", "size": 3699}
 {"file": "data.json", "raw": 24000, "method": "zstd -19", "size": 3255}
 {"file": "data.json", "raw": 24000, "method": "xz -9e", "size": 3024}
 {"file": "data.json", "raw": 24000, "method": "7z -mx9", "size": 3028}
-{"file": "data.json", "raw": 24000, "method": "ezpz (default -l 7)", "size": 3463}
-{"file": "data.json", "raw": 24000, "method": "ezpz --max (-l 10)", "size": 2545}
-{"file": "data.json", "raw": 24000, "method": "ezpz -l 11", "size": 2474}
+{"file": "data.json", "raw": 24000, "method": "ezpz (default -l 7)", "size": 3419}
+{"file": "data.json", "raw": 24000, "method": "ezpz --max (-l 10)", "size": 2544}
+{"file": "data.json", "raw": 24000, "method": "ezpz -l 11", "size": 2473}
 {"file": "data.tab", "raw": 17605, "method": "zip -9", "size": 8796}
 {"file": "data.tab", "raw": 17605, "method": "gzip -9", "size": 8657}
 {"file": "data.tab", "raw": 17605, "method": "zstd -19", "size": 8387}
 {"file": "data.tab", "raw": 17605, "method": "xz -9e", "size": 7668}
 {"file": "data.tab", "raw": 17605, "method": "7z -mx9", "size": 7713}
-{"file": "data.tab", "raw": 17605, "method": "ezpz (default -l 7)", "size": 8635}
-{"file": "data.tab", "raw": 17605, "method": "ezpz --max (-l 10)", "size": 6500}
-{"file": "data.tab", "raw": 17605, "method": "ezpz -l 11", "size": 6372}
+{"file": "data.tab", "raw": 17605, "method": "ezpz (default -l 7)", "size": 8438}
+{"file": "data.tab", "raw": 17605, "method": "ezpz --max (-l 10)", "size": 6499}
+{"file": "data.tab", "raw": 17605, "method": "ezpz -l 11", "size": 6371}
 {"file": "data.xml", "raw": 24000, "method": "zip -9", "size": 2781}
 {"file": "data.xml", "raw": 24000, "method": "gzip -9", "size": 2642}
 {"file": "data.xml", "raw": 24000, "method": "zstd -19", "size": 2374}
 {"file": "data.xml", "raw": 24000, "method": "xz -9e", "size": 2276}
 {"file": "data.xml", "raw": 24000, "method": "7z -mx9", "size": 2367}
-{"file": "data.xml", "raw": 24000, "method": "ezpz (default -l 7)", "size": 2622}
-{"file": "data.xml", "raw": 24000, "method": "ezpz --max (-l 10)", "size": 2146}
-{"file": "data.xml", "raw": 24000, "method": "ezpz -l 11", "size": 2143}
+{"file": "data.xml", "raw": 24000, "method": "ezpz (default -l 7)", "size": 2618}
+{"file": "data.xml", "raw": 24000, "method": "ezpz --max (-l 10)", "size": 2145}
+{"file": "data.xml", "raw": 24000, "method": "ezpz -l 11", "size": 2142}
 {"file": "en_license.txt", "raw": 11358, "method": "zip -9", "size": 4128}
 {"file": "en_license.txt", "raw": 11358, "method": "gzip -9", "size": 3983}
 {"file": "en_license.txt", "raw": 11358, "method": "zstd -19", "size": 3825}
 {"file": "en_license.txt", "raw": 11358, "method": "xz -9e", "size": 3892}
 {"file": "en_license.txt", "raw": 11358, "method": "7z -mx9", "size": 3970}
-{"file": "en_license.txt", "raw": 11358, "method": "ezpz (default -l 7)", "size": 4077}
-{"file": "en_license.txt", "raw": 11358, "method": "ezpz --max (-l 10)", "size": 2946}
-{"file": "en_license.txt", "raw": 11358, "method": "ezpz -l 11", "size": 2901}
+{"file": "en_license.txt", "raw": 11358, "method": "ezpz (default -l 7)", "size": 3720}
+{"file": "en_license.txt", "raw": 11358, "method": "ezpz --max (-l 10)", "size": 2945}
+{"file": "en_license.txt", "raw": 11358, "method": "ezpz -l 11", "size": 2900}
 {"file": "en_novel.txt", "raw": 32000, "method": "zip -9", "size": 13689}
 {"file": "en_novel.txt", "raw": 32000, "method": "gzip -9", "size": 13546}
 {"file": "en_novel.txt", "raw": 32000, "method": "zstd -19", "size": 12983}
 {"file": "en_novel.txt", "raw": 32000, "method": "xz -9e", "size": 12948}
 {"file": "en_novel.txt", "raw": 32000, "method": "7z -mx9", "size": 13034}
-{"file": "en_novel.txt", "raw": 32000, "method": "ezpz (default -l 7)", "size": 13235}
-{"file": "en_novel.txt", "raw": 32000, "method": "ezpz --max (-l 10)", "size": 10169}
-{"file": "en_novel.txt", "raw": 32000, "method": "ezpz -l 11", "size": 10082}
+{"file": "en_novel.txt", "raw": 32000, "method": "ezpz (default -l 7)", "size": 12583}
+{"file": "en_novel.txt", "raw": 32000, "method": "ezpz --max (-l 10)", "size": 10168}
+{"file": "en_novel.txt", "raw": 32000, "method": "ezpz -l 11", "size": 10081}
 {"file": "en_page.html", "raw": 4521, "method": "zip -9", "size": 2114}
 {"file": "en_page.html", "raw": 4521, "method": "gzip -9", "size": 1971}
 {"file": "en_page.html", "raw": 4521, "method": "zstd -19", "size": 1941}
 {"file": "en_page.html", "raw": 4521, "method": "xz -9e", "size": 2036}
 {"file": "en_page.html", "raw": 4521, "method": "7z -mx9", "size": 2112}
-{"file": "en_page.html", "raw": 4521, "method": "ezpz (default -l 7)", "size": 2191}
-{"file": "en_page.html", "raw": 4521, "method": "ezpz --max (-l 10)", "size": 1533}
-{"file": "en_page.html", "raw": 4521, "method": "ezpz -l 11", "size": 1519}
+{"file": "en_page.html", "raw": 4521, "method": "ezpz (default -l 7)", "size": 1883}
+{"file": "en_page.html", "raw": 4521, "method": "ezpz --max (-l 10)", "size": 1532}
+{"file": "en_page.html", "raw": 4521, "method": "ezpz -l 11", "size": 1518}
 {"file": "es_tutor.txt", "raw": 12000, "method": "zip -9", "size": 4026}
 {"file": "es_tutor.txt", "raw": 12000, "method": "gzip -9", "size": 3883}
 {"file": "es_tutor.txt", "raw": 12000, "method": "zstd -19", "size": 3756}
 {"file": "es_tutor.txt", "raw": 12000, "method": "xz -9e", "size": 3784}
 {"file": "es_tutor.txt", "raw": 12000, "method": "7z -mx9", "size": 3860}
-{"file": "es_tutor.txt", "raw": 12000, "method": "ezpz (default -l 7)", "size": 4006}
+{"file": "es_tutor.txt", "raw": 12000, "method": "ezpz (default -l 7)", "size": 3961}
 {"file": "es_tutor.txt", "raw": 12000, "method": "ezpz --max (-l 10)", "size": 3220}
 {"file": "es_tutor.txt", "raw": 12000, "method": "ezpz -l 11", "size": 3184}
 {"file": "ja_page.html", "raw": 5884, "method": "zip -9", "size": 2430}
@@ -67,15 +67,15 @@
 {"file": "ja_page.html", "raw": 5884, "method": "zstd -19", "size": 2260}
 {"file": "ja_page.html", "raw": 5884, "method": "xz -9e", "size": 2224}
 {"file": "ja_page.html", "raw": 5884, "method": "7z -mx9", "size": 2296}
-{"file": "ja_page.html", "raw": 5884, "method": "ezpz (default -l 7)", "size": 2510}
-{"file": "ja_page.html", "raw": 5884, "method": "ezpz --max (-l 10)", "size": 1878}
-{"file": "ja_page.html", "raw": 5884, "method": "ezpz -l 11", "size": 1848}
+{"file": "ja_page.html", "raw": 5884, "method": "ezpz (default -l 7)", "size": 2385}
+{"file": "ja_page.html", "raw": 5884, "method": "ezpz --max (-l 10)", "size": 1877}
+{"file": "ja_page.html", "raw": 5884, "method": "ezpz -l 11", "size": 1847}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "zip -9", "size": 4623}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "gzip -9", "size": 4480}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "zstd -19", "size": 4325}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "xz -9e", "size": 4256}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "7z -mx9", "size": 4335}
-{"file": "ja_tutor.txt", "raw": 16000, "method": "ezpz (default -l 7)", "size": 4576}
+{"file": "ja_tutor.txt", "raw": 16000, "method": "ezpz (default -l 7)", "size": 4460}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "ezpz --max (-l 10)", "size": 3454}
 {"file": "ja_tutor.txt", "raw": 16000, "method": "ezpz -l 11", "size": 3402}
 {"file": "ko_readme.md", "raw": 7427, "method": "zip -9", "size": 3706}
@@ -83,23 +83,23 @@
 {"file": "ko_readme.md", "raw": 7427, "method": "zstd -19", "size": 3491}
 {"file": "ko_readme.md", "raw": 7427, "method": "xz -9e", "size": 3464}
 {"file": "ko_readme.md", "raw": 7427, "method": "7z -mx9", "size": 3525}
-{"file": "ko_readme.md", "raw": 7427, "method": "ezpz (default -l 7)", "size": 3741}
-{"file": "ko_readme.md", "raw": 7427, "method": "ezpz --max (-l 10)", "size": 2688}
-{"file": "ko_readme.md", "raw": 7427, "method": "ezpz -l 11", "size": 2651}
+{"file": "ko_readme.md", "raw": 7427, "method": "ezpz (default -l 7)", "size": 3388}
+{"file": "ko_readme.md", "raw": 7427, "method": "ezpz --max (-l 10)", "size": 2687}
+{"file": "ko_readme.md", "raw": 7427, "method": "ezpz -l 11", "size": 2650}
 {"file": "ko_spec.md", "raw": 24000, "method": "zip -9", "size": 10322}
 {"file": "ko_spec.md", "raw": 24000, "method": "gzip -9", "size": 10181}
 {"file": "ko_spec.md", "raw": 24000, "method": "zstd -19", "size": 9752}
 {"file": "ko_spec.md", "raw": 24000, "method": "xz -9e", "size": 9572}
 {"file": "ko_spec.md", "raw": 24000, "method": "7z -mx9", "size": 9625}
-{"file": "ko_spec.md", "raw": 24000, "method": "ezpz (default -l 7)", "size": 10003}
-{"file": "ko_spec.md", "raw": 24000, "method": "ezpz --max (-l 10)", "size": 7552}
-{"file": "ko_spec.md", "raw": 24000, "method": "ezpz -l 11", "size": 7469}
+{"file": "ko_spec.md", "raw": 24000, "method": "ezpz (default -l 7)", "size": 9373}
+{"file": "ko_spec.md", "raw": 24000, "method": "ezpz --max (-l 10)", "size": 7551}
+{"file": "ko_spec.md", "raw": 24000, "method": "ezpz -l 11", "size": 7468}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "zip -9", "size": 5183}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "gzip -9", "size": 5040}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "zstd -19", "size": 4846}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "xz -9e", "size": 4812}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "7z -mx9", "size": 4884}
-{"file": "ko_tutor.txt", "raw": 16000, "method": "ezpz (default -l 7)", "size": 5096}
+{"file": "ko_tutor.txt", "raw": 16000, "method": "ezpz (default -l 7)", "size": 4642}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "ezpz --max (-l 10)", "size": 3570}
 {"file": "ko_tutor.txt", "raw": 16000, "method": "ezpz -l 11", "size": 3507}
 {"file": "py_module.py", "raw": 19718, "method": "zip -9", "size": 6227}
@@ -107,14 +107,14 @@
 {"file": "py_module.py", "raw": 19718, "method": "zstd -19", "size": 5870}
 {"file": "py_module.py", "raw": 19718, "method": "xz -9e", "size": 5904}
 {"file": "py_module.py", "raw": 19718, "method": "7z -mx9", "size": 5985}
-{"file": "py_module.py", "raw": 19718, "method": "ezpz (default -l 7)", "size": 6120}
-{"file": "py_module.py", "raw": 19718, "method": "ezpz --max (-l 10)", "size": 4635}
-{"file": "py_module.py", "raw": 19718, "method": "ezpz -l 11", "size": 4576}
+{"file": "py_module.py", "raw": 19718, "method": "ezpz (default -l 7)", "size": 5717}
+{"file": "py_module.py", "raw": 19718, "method": "ezpz --max (-l 10)", "size": 4634}
+{"file": "py_module.py", "raw": 19718, "method": "ezpz -l 11", "size": 4575}
 {"file": "wiki.xml", "raw": 16000, "method": "zip -9", "size": 7373}
 {"file": "wiki.xml", "raw": 16000, "method": "gzip -9", "size": 7234}
 {"file": "wiki.xml", "raw": 16000, "method": "zstd -19", "size": 7022}
 {"file": "wiki.xml", "raw": 16000, "method": "xz -9e", "size": 6932}
 {"file": "wiki.xml", "raw": 16000, "method": "7z -mx9", "size": 7007}
-{"file": "wiki.xml", "raw": 16000, "method": "ezpz (default -l 7)", "size": 7268}
-{"file": "wiki.xml", "raw": 16000, "method": "ezpz --max (-l 10)", "size": 5586}
-{"file": "wiki.xml", "raw": 16000, "method": "ezpz -l 11", "size": 5547}
+{"file": "wiki.xml", "raw": 16000, "method": "ezpz (default -l 7)", "size": 6843}
+{"file": "wiki.xml", "raw": 16000, "method": "ezpz --max (-l 10)", "size": 5585}
+{"file": "wiki.xml", "raw": 16000, "method": "ezpz -l 11", "size": 5546}

@@ -335,8 +335,8 @@ fn run() -> Result<()> {
                 }
                 let c = s.codec_blocks;
                 eprintln!(
-                    "  {} blocks (store {}, zstd {}, lzma2 {}, brain {}, brain-fast {})",
-                    s.blocks, c[0], c[1], c[2], c[3], c[4]
+                    "  {} blocks (store {}, zstd {}, lzma2 {}, brain {}, brain-fast {}, zstd-primed {})",
+                    s.blocks, c[0], c[1], c[2], c[3], c[4], c[5]
                 );
             }
         }
@@ -554,23 +554,33 @@ fn run() -> Result<()> {
             }
             println!("blocks:      {}", ar.table.blocks.len());
             for (k, (n, r, s)) in per {
-                println!("  {k:<6} {n:>5} blocks  {} -> {}", human(r), human(s));
+                println!("  {k:<11} {n:>5} blocks  {} -> {}", human(r), human(s));
             }
             let cat = ar.catalog();
             let cm = ar.chunk_map();
             let mut logical = 0u64;
             let (mut nf, mut nd, mut nl) = (0, 0, 0);
+            let mut xf_count = [0u64; filter::XF_MAX as usize + 1];
             for e in &cat.entries {
                 match &e.kind {
-                    Kind::File { chunks, .. } => {
+                    Kind::File { chunks, transform, .. } => {
                         nf += 1;
                         logical += cm.file_size(chunks);
+                        xf_count[(*transform).min(filter::XF_MAX) as usize] += 1;
                     }
                     Kind::Dir => nd += 1,
                     Kind::Symlink { .. } => nl += 1,
                 }
             }
             println!("entries:     {nf} files, {nd} dirs, {nl} symlinks");
+            let xf_names = ["none", "x86", "arm64", "x86-64", "x86-64 split"];
+            let used: Vec<String> = (1..xf_count.len())
+                .filter(|&t| xf_count[t] > 0)
+                .map(|t| format!("{} {} files", xf_names[t], xf_count[t]))
+                .collect();
+            if !used.is_empty() {
+                println!("transforms:  {}", used.join(", "));
+            }
             println!(
                 "content:     {} (unique after dedup: {})",
                 human(logical),

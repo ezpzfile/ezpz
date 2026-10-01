@@ -16,7 +16,7 @@ rows = {}
 for r in load("results_v1.jsonl"):
     if "ezpz" not in r["method"]:
         rows[(r["dataset"], r["method"])] = r
-for r in load("results_v2.jsonl") + load("results_v3.jsonl") + load("results_v4.jsonl"):  # later rows win
+for r in load("results_v2.jsonl") + load("results_v3.jsonl") + load("results_v4.jsonl") + load("results_v5.jsonl"):  # later rows win
     r = dict(r, method=RENAMED.get(r["method"], r["method"]))
     rows[(r["dataset"], r["method"])] = r
 
@@ -45,7 +45,7 @@ L = {
         "setup_h": "## Test setup",
         "setup": [
             "- A 2-core Intel Xeon 2.1 GHz virtual server (on the slow side), Linux. Every tool that supports threads ran with 2 threads (`zstd -T2`, `xz -T2`, `7z -mmt=2`, `ezpz -j2`).",
-            "- Versions: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.3.0. The ezpz rows for levels 3, 7, 9, and 11 on the Wikipedia text and the Silesia corpus come from ezpz 0.1.0, which writes the same data for them.",
+            "- Versions: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.4.0. On the Wikipedia text and the Silesia corpus, the ezpz rows come from earlier versions that write the same data for them: levels 3, 7, 9, and 11 from ezpz 0.1.0, and `--max` from ezpz 0.3.0.",
             "- Each measurement was taken once on an otherwise idle server, so expect a few percent of noise in the timings.",
             "- Sizes read original → compressed, in MB (1 MB = 1,000,000 bytes). The compressed size is the whole archive file, index included. \"80% smaller\" means the archive is one fifth the size of the original.",
             "- Single file is the time to extract one small file (for example `json/decoder.py`) from the archive. The tar formats have to be decompressed from the start to reach it.",
@@ -68,11 +68,11 @@ L = {
         "sec": lambda x: (f"{x:.2f} s" if x < 1 else f"{x:.1f} s" if x < 100 else f"{x:.0f} s"),
         "small_h": "## Small files",
         "small_intro": [
-            "Fifteen files of 4 to 35 KB, each compressed on its own. Sizes are in KB (1 KB = 1,000 bytes) and include each format's own headers. gzip, zstd, and xz write a single compressed stream with almost no header. zip, 7z, and ezpz write archives with an index; for ezpz that index plus the trailer adds about 250 bytes per archive, mostly hashes. Both brain codecs start these small blocks from the built-in priming data (SPEC §6.4.11).",
+            "Fifteen files of 4 to 35 KB, each compressed on its own. Sizes are in KB (1 KB = 1,000 bytes) and include each format's own headers. gzip, zstd, and xz write a single compressed stream with almost no header. zip, 7z, and ezpz write archives with an index; for ezpz that index plus the trailer adds about 250 bytes per archive, mostly hashes. Both brain codecs start these small blocks from the built-in priming data (SPEC §6.4.11), and the default level uses the same data as a zstd dictionary (§6.6).",
         ],
         "small_cols": "| Content | Original |",
         "small_total": "**Total**",
-        "small_note": lambda mx, xz, zp: f"In total, ezpz --max is {(1 - mx / xz) * 100:.1f}% smaller than xz -9e and {(1 - mx / zp) * 100:.1f}% smaller than zip -9 on these files.",
+        "small_note": lambda mx, xz, zp, l7: f"In total, ezpz --max is {(1 - mx / xz) * 100:.1f}% smaller than xz -9e and {(1 - mx / zp) * 100:.1f}% smaller than zip -9 on these files. The default level is {(1 - l7 / zp) * 100:.1f}% smaller than zip -9.",
         "kb": " KB",
         "small_names": {
             "c_header.h": "C header (glibc stdio.h)", "data.json": "JSON (ISO country codes)",
@@ -105,7 +105,7 @@ L = {
         "setup_h": "## 측정 환경",
         "setup": [
             "- 2코어 Intel Xeon 2.1GHz 가상 서버(느린 편), 리눅스. 스레드를 지원하는 도구는 모두 2스레드로 실행했어요 (`zstd -T2`, `xz -T2`, `7z -mmt=2`, `ezpz -j2`).",
-            "- 도구 버전: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.3.0. 위키백과 텍스트와 표준 테스트 세트의 레벨 3, 7, 9, 11 줄은 ezpz 0.1.0으로 쟀는데, 이 경우엔 두 버전이 같은 데이터를 만들어요.",
+            "- 도구 버전: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.4.0. 위키백과 텍스트와 표준 테스트 세트의 ezpz 줄은 같은 데이터를 만드는 이전 버전으로 쟀어요. 레벨 3, 7, 9, 11은 ezpz 0.1.0, `--max`는 ezpz 0.3.0이에요.",
             "- 각 항목은 한 번씩 측정했어요. 시간은 같은 서버에서 다른 작업이 거의 없을 때 잰 값이지만 몇 % 정도의 오차는 있을 수 있어요.",
             "- 크기는 **원래 크기 → 압축 후 크기** 순서로, MB 단위(1MB = 1,000,000바이트)로 적었어요. 압축 후 크기는 결과 파일 전체(인덱스·목록 포함)예요. **80% 줄어듦**이면 압축 파일이 원래의 5분의 1 크기라는 뜻이에요.",
             "- **파일 하나 꺼내기**: 아카이브 속 작은 파일 1개(예: `json/decoder.py`)를 꺼내는 데 걸린 시간. tar 계열은 구조상 앞에서부터 풀어야 해요.",
@@ -128,11 +128,11 @@ L = {
         "sec": lambda x: (f"{x:.2f}초" if x < 1 else f"{x:.1f}초" if x < 100 else f"{x:.0f}초"),
         "small_h": "## 작은 파일",
         "small_intro": [
-            "4~35KB짜리 파일 15개를 하나씩 따로 압축했어요. 크기는 KB(1KB = 1,000바이트) 단위이고 각 형식의 머리말까지 포함해요. gzip, zstd, xz는 머리말이 거의 없는 압축 스트림 하나만 써요. zip, 7z, ezpz는 목록이 붙은 아카이브인데, ezpz는 목록과 끝부분 정보가 아카이브마다 250바이트쯤 더 붙고 대부분은 해시예요. 두 뇌 코덱 모두 이런 작은 블록은 내장된 사전 학습 데이터로 미리 배운 상태에서 시작해요(SPEC §6.4.11).",
+            "4~35KB짜리 파일 15개를 하나씩 따로 압축했어요. 크기는 KB(1KB = 1,000바이트) 단위이고 각 형식의 머리말까지 포함해요. gzip, zstd, xz는 머리말이 거의 없는 압축 스트림 하나만 써요. zip, 7z, ezpz는 목록이 붙은 아카이브인데, ezpz는 목록과 끝부분 정보가 아카이브마다 250바이트쯤 더 붙고 대부분은 해시예요. 두 뇌 코덱 모두 이런 작은 블록은 내장된 사전 학습 데이터로 미리 배운 상태에서 시작하고(SPEC §6.4.11), 기본 레벨은 같은 데이터를 zstd 사전으로 써요(§6.6).",
         ],
         "small_cols": "| 내용 | 원래 크기 |",
         "small_total": "**합계**",
-        "small_note": lambda mx, xz, zp: f"합치면 ezpz --max가 xz -9e보다 {(1 - mx / xz) * 100:.1f}%, zip -9보다 {(1 - mx / zp) * 100:.1f}% 작아요.",
+        "small_note": lambda mx, xz, zp, l7: f"합치면 ezpz --max가 xz -9e보다 {(1 - mx / xz) * 100:.1f}%, zip -9보다 {(1 - mx / zp) * 100:.1f}% 작아요. 기본 레벨은 zip -9보다 {(1 - l7 / zp) * 100:.1f}% 작아요.",
         "kb": "KB",
         "small_names": {
             "c_header.h": "C 헤더 (glibc stdio.h)", "data.json": "JSON (ISO 국가 코드)",
@@ -242,7 +242,7 @@ def render(lang):
     best = min(tot.values())
     out.append(f"| {s['small_total']} | {kb(sum(raw.values()))} | "
                + " | ".join(f"**{kb(v)}**" if v == best else kb(v) for v in tot.values()) + " |")
-    out += ["", s["small_note"](tot["ezpz --max (-l 10)"], tot["xz -9e"], tot["zip -9"]), ""]
+    out += ["", s["small_note"](tot["ezpz --max (-l 10)"], tot["xz -9e"], tot["zip -9"], tot["ezpz (default -l 7)"]), ""]
 
     out += [s["discussion_h"], ""]
     out += open(os.path.join(HERE, s["notes"]), encoding="utf-8").read().strip().splitlines()

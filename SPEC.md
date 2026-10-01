@@ -146,7 +146,8 @@ Data blocks, the block table, and the catalog all start with the same 16-byte fr
 | 2 | lzma2 | A dictionary-size property byte followed by a raw LZMA2 stream |
 | 3 | brain | A table-size byte followed by an arithmetic-coded bit stream (§6.4) |
 | 4 | brain-fast | A table-size byte, a 2-byte model mask, then an arithmetic-coded bit stream (§6.5) |
-| 5-255 | reserved | Unknown codecs MUST be treated as an error |
+| 5 | zstd-primed | Zstandard frames compressed with the priming data as a dictionary (§6.6) |
+| 6-255 | reserved | Unknown codecs MUST be treated as an error |
 
 Encoders SHOULD store a block with codec 0 when compression does not make it smaller.
 
@@ -489,6 +490,17 @@ Memory use (informative): about `2m × 2^tb + 2^(tb-1) + raw_len + 1 MiB` bytes,
 
 A block of up to 192 KiB is coded with both masks, and the smaller result is kept. For a larger block, a 192 KiB sample (64 KiB each from the start, the middle, and the end) is coded with both, and `0x01CB` is used only if its output is at least 0.5% smaller: on short samples the binary set looks better than it later turns out to be on the whole block.
 
+### 6.6 zstd-primed (codec 5)
+
+Codec 5 gives zstd the built-in knowledge of the brain codecs: its frames are compressed with the priming data D (Appendix B) as a dictionary.
+
+- The payload is the same as for codec 1: one or more RFC 8878 Zstandard frames. Every rule of §6.2 applies (skippable frames, window limit, total decoded length).
+- Every frame is decoded with D as a raw content dictionary (RFC 8878 §5). D acts as content that comes right before the frame, so matches can reach back into it within the limits RFC 8878 §5 sets. D brings no entropy tables, and the repeat offsets start at 1, 4, and 8. Decoders MUST load D as raw content and not try to parse it as a formatted dictionary (in libzstd: `ZSTD_dct_rawContent`).
+- Encoders MUST NOT write a nonzero dictionary ID; the reference encoder leaves the field out (Dictionary_ID_flag = 0). Decoders MUST reject a frame with a nonzero dictionary ID. (libzstd does this by itself when D is loaded as raw content.)
+- Index frames MUST NOT use codec 5 (§5). A decoder that cannot load D MUST fail when it has to decode a codec 5 block.
+
+D helps small blocks most (informative). On the 15 small files of the benchmark (4 to 35 KB), the default level came out 5.4% smaller in total, and up to 14% smaller on a single file. At ezpz levels 1 to 9, wherever it uses zstd (level 9 also tries LZMA2), the reference encoder compresses each block of up to 1 MiB both with and without D, and uses codec 5 only when that gives a smaller result (a tie keeps codec 1). It does not try larger blocks, where D saves well under 1%. Decoding with D takes about as long as decoding without it.
+
 ## 7. Block table (`EZBT`, always plaintext)
 
 The decoded frame payload is laid out as follows. Values are grouped by column so that they compress well.
@@ -564,6 +576,7 @@ These transforms turn relative jump targets in machine code into absolute addres
 | 1 | x86 (E8/E9) |
 | 2 | ARM64 (BL) |
 | 3 | x86-64 (E8/E9 and RIP-relative addresses) |
+| 4 | x86-64 split (E8 and RIP-relative addresses, moved to the end of the file) |
 
 ```
 x86(buf, encode):
@@ -590,7 +603,7 @@ arm64(buf, encode):
 
 Both transforms are exactly reversible. For x86, a transformed value stays within the same range, so the decoder can tell which values were changed.
 
-**x86-64 (transform 3).** 64-bit x86 code refers to global data and to the GOT through RIP-relative addresses: a 32-bit displacement right after a ModRM byte whose mod field is 00 and whose r/m field is 101. Transform 3 converts those displacements as well as CALL and JMP targets, with the same 24-bit rule as transform 1. The position added to an address is `i`, the offset of the first byte of the matched pattern (a prefix, a REX byte, or the opcode). Every matched address field is skipped afterwards, whether or not it was in range and converted. A failed check at `i` looks at bytes up to `i + 4` at most, and the byte values that start a pattern (E8, E9, 66, F2, F3, 40 to 4F, 0F) are in neither OP1 nor OP2. Together this makes the decoder retrace the encoder's path exactly. Changing OP1 or OP2 would need the same care.
+**x86-64 (transform 3).** 64-bit x86 code refers to global data and to the GOT through RIP-relative addresses: a 32-bit displacement right after a ModRM byte whose mod field is 00 and whose r/m field is 101. Transform 3 converts those displacements as well as CALL and JMP targets, with the same 24-bit rule as transform 1. The position added to an address is `i`, the offset of the first byte of the matched pattern (a prefix, a REX byte, or the opcode). Every matched address field is skipped afterwards, whether or not it was in range and converted. A failed check at `i` looks at bytes up to `i + 4` at most, and never at a byte of a later pattern's address field; this relies on E8 and E9 being in neither OP1 nor OP2, and on 0F not being in OP1. Together this makes the decoder retrace the encoder's path exactly. Changing OP1 or OP2 would need the same care.
 
 ```
 conv24(buf, off, pos, encode):                # the rule of transform 1, for a field at off
@@ -620,6 +633,59 @@ x86_64(buf, encode):
 ```
 
 OP1 and OP2 are sets of byte values (hexadecimal). Encoders SHOULD check that decoding gives back the original file and use transform 1 if it does not; the reference encoder does this for every file, although no failing input is known.
+
+**x86-64 split (transform 4).** Transform 4 looks for CALL (E8) and for the RIP-relative patterns of transform 3. Instead of converting each address field in place, it takes the field out of the code and moves it to the end of the file. The code that remains is then identical wherever the same instructions appear, even in another build of the program where everything sits at different addresses, so the compressor finds long matches across files. Every matched field is moved; fields in range are first converted to absolute addresses. The fields at the end are stored big-endian, last field first. Two more things differ from transform 3:
+
+- E9 is an ordinary byte: the scan moves on by one byte, and the bytes of the JMP's operand are scanned like any other code. Inside a function, a jump target compresses better as a relative value (informative).
+- The range of converted values grows with the file. B is the smallest number from 23 to 31 with 2^B ≥ n (the length of the file), or 31 if there is none, and a field is converted when its value, read as a signed 32-bit number, lies in [-2^B, 2^B). For files up to 8 MiB this is the rule of transform 1; in a larger program, calls and data references that span more than 8 MiB are converted too. At B = 31 every value is in range, and the sign extension changes nothing.
+
+```
+B = 23 ; while B < 31 and 2^B < n: B += 1                  # n = length of the file
+
+convB(v, pos, encode):               # u32 arithmetic, pos taken modulo 2^32
+  if (v >> B) == 0 or (v >> B) == (0xFFFFFFFF >> B):        # v in [-2^B, 2^B)
+    m = 0xFFFFFFFF >> (31 - B)                              # the low B+1 bits
+    r = (encode ? v + pos : v - pos) & m
+    if r >> B: r |= 0xFFFFFFFF ^ m                          # sign-extend from bit B
+    return r
+  return v
+
+field(buf, i, end):                  # offset of the address field of a pattern at i, or none
+  c = buf[i]
+  if c == 0xE8: return i + 1
+  j = i
+  if c == 0x66 or c == 0xF2 or c == 0xF3: j += 1
+  if j < end and (buf[j] & 0xF0) == 0x40: j += 1
+  if j + 7 <= end and buf[j] == 0x0F and buf[j+1] in OP2 and (buf[j+2] & 0xC7) == 0x05: return j + 3
+  if j + 6 <= end and buf[j] in OP1 and (buf[j+1] & 0xC7) == 0x05: return j + 2
+  return none
+
+split_encode(buf):                   # n = len(buf), B from n; the result also has n bytes
+  code = [] ; tail = [] ; i = 0
+  while i + 5 <= n:
+    f = field(buf, i, n)
+    if f is none: code += buf[i] ; i += 1 ; continue
+    code += buf[i..f]
+    tail = u32be(convB(u32le(buf[f..f+4]), i, true)) ++ tail    # prepend: last field first
+    i = f + 4
+  return code ++ buf[i..n] ++ tail
+
+split_decode(t):                     # n = len(t), B from n
+  out = [] ; q = 0 ; T = n           # T: end of the bytes not used yet
+  while q + 5 <= T:
+    f = field(t, q, T)
+    if f is none: out += t[q] ; q += 1 ; continue
+    pos = len(out)                   # where the pattern starts in the original file
+    out += t[q..f]
+    w = u32be(t[T-4..T]) ; T -= 4
+    out += u32le(convB(w, pos, false))
+    q = f
+  return out ++ t[q..T]              # n bytes
+```
+
+The decoder retraces the encoder's path for two reasons. First, moving fields never changes what a check sees: a failed check at i reads bytes up to i + 4 at most, and never a byte of a later pattern's address field. As for transform 3, this relies on E8 being in neither OP1 nor OP2, and on 0F not being in OP1. Second, T − q always equals n − len(out), so the bounds checks give the same answers as in the encoder. Any input decodes to n bytes, so there is no malformed case to reject; block hashes, and file hashes when the archive has them, catch damage. Like transforms 1 to 3, transform 4 works on the whole file, and it needs a second buffer of the same size. Encoders SHOULD check that decoding gives back the original file, and otherwise use transform 3 or 1; the reference encoder does this for every file.
+
+Effect (informative): compared with transform 3, the output of two builds of the same program (cmake and cpack, 24 MB together) shrank by 11% with LZMA2 and by 22% with brain-fast, a 48 MB Go program shrank by about 8%, and a set of 145 small C programs by 1 to 2%. On the extension modules of a Python installation, small unrelated libraries, transform 3 was about 1.5% smaller; §15.1 describes how the reference encoder chooses.
 
 ## 10. Signature section (104 bytes, optional)
 
@@ -710,7 +776,7 @@ Without the password, a reader can still carry out steps 1 to 7 and check every 
 Decoders do not need anything in this section. It describes how the reference encoder makes good use of the format.
 
 ### 15.1 Classifying and ordering files
-- Classify each file from its first 64 KiB: executables (architecture detected from ELF, Mach-O, or PE headers), already-compressed files (detected by extension, magic bytes, and a quick trial compression), and everything else. 64-bit x86 executables get transform 3, 32-bit x86 executables transform 1, and ARM64 executables transform 2.
+- Classify each file from its first 64 KiB: executables (architecture detected from ELF, Mach-O, or PE headers), already-compressed files (detected by extension, magic bytes, and a quick trial compression), and everything else. 64-bit x86 executables get transform 4 or 3, 32-bit x86 executables transform 1, and ARM64 executables transform 2. Transform 4 wins on large programs and on several builds of the same program, but on a set of unrelated small libraries transform 3 can come out about 1.5% smaller. So at levels 4 and above, the reference encoder compresses all 64-bit x86 executables of the archive in storage order, once with each transform, using zstd level 1 with long-distance matching and a 64 MiB window, and uses the transform that gave the smaller result for all of them. Levels 1 to 3 skip this trial and use transform 4.
 - Group already-compressed files into separate blocks stored with codec 0, which saves time.
 - Order executables by (architecture, size), so that similar builds of the same program sit together and one huge file does not push related files far apart.
 - Order everything else by (extension, file name, path), so that, for example, files with the same name from different versions end up side by side.
@@ -735,12 +801,12 @@ Decoders do not need anything in this section. It describes how the reference en
 | 10 (`--max`) | brain-fast | 16 MiB |
 | 11 | brain | 64 MiB |
 
-Blocks are independent of each other, so they are compressed and extracted on several cores at once. A brain codec block can only be coded on one core, which is why level 10 uses 16 MiB blocks: even a 50 MB input keeps several cores busy. Going from 64 MiB to 16 MiB blocks makes brain codec output about 2% larger.
+At levels 1 to 9, blocks of up to 1 MiB are also tried with codec 5 (§6.6). Blocks are independent of each other, so they are compressed and extracted on several cores at once. A brain codec block can only be coded on one core, which is why level 10 uses 16 MiB blocks: even a 50 MB input keeps several cores busy. Going from 64 MiB to 16 MiB blocks makes brain codec output about 2% larger.
 
 ## 16. Security considerations
 
 - **Path attacks (zip-slip)**: always check the path rules in §8. Extractors SHOULD create symbolic links after writing all regular files, and SHOULD NOT create links that point outside the extraction folder or to absolute paths unless the user allows it.
-- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb (codecs 3 and 4), and zstd window cap the memory a single block can use. Priming adds a fixed 75,598 bytes. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
+- **Decompression bombs**: the limits on block raw_len (256 MiB), index size (1 GiB), LZMA2 dictionary size, brain codec tb (codecs 3 and 4), and zstd window cap the memory a single block can use. The priming data (codecs 3, 4, and 5) adds a fixed 75,598 bytes. Extractors can compute the total extracted size in advance (the sum of the chunk lengths) and show it to the user or enforce a limit.
 - **Tampering**: check block hashes before writing and file hashes afterwards. If a signed archive's signature does not verify, extract nothing. See §12 for protection against deliberate tampering.
 - **Name collisions**: on case-insensitive file systems (the default on Windows and macOS), `A.txt` and `a.txt` are the same file, and macOS may treat names that differ only in Unicode normalization as the same name. On Windows, reserved names such as `CON`, `NUL`, and `COM1`, and a `:` inside a name (alternate data streams), are also dangerous. An extractor that detects such a collision SHOULD rename the file or stop, and not overwrite.
 - **Permissions**: setuid, setgid, and sticky bits are not restored by default (§8).
@@ -750,11 +816,11 @@ Blocks are independent of each other, so they are compressed and extracted on se
 
 - Incompatible changes increase version_major.
 - New features are added as (a) new codec ids, (b) header extension records, with the critical bit if needed, or (c) new flag bits. Older decoders are designed to reject anything they do not understand, with a clear error, instead of silently producing wrong output.
-- Draft history: ezpz 0.2.0 (2026-10-02) added codec 4. ezpz 0.3.0 gave codec 4 its model mask (§6.5) and added transform 3 (§9). Blocks that 0.2.0 wrote with codec 4 cannot be read by later versions.
+- Draft history: ezpz 0.2.0 (2026-10-02) added codec 4. ezpz 0.3.0 gave codec 4 its model mask (§6.5) and added transform 3 (§9). Blocks that 0.2.0 wrote with codec 4 cannot be read by later versions. ezpz 0.4.0 added codec 5 (§6.6) and transform 4 (§9); earlier versions reject archives that use them.
 
 ## 18. Future work (candidates for v1.x and later)
 
-- **Built-in knowledge for zstd**: use the priming data (Appendix B) as a zstd dictionary as well, so small files also shrink more at the default level.
+- **ARM64 split**: move BL targets out of the code, as transform 4 does for x86-64, for programs built for Apple Silicon and other ARM64 machines.
 - **Recovery records**: Reed-Solomon parity blocks that repair partial damage.
 - **Append**: add files to an existing archive while deduplicating against the chunks already stored.
 - **Deflate recompression**: decompress the deflate streams inside zip, docx, and png files to compress them better, and restore the original bytes exactly on extraction.
@@ -772,16 +838,18 @@ To find out whether this specification is precise enough to build a compatible i
 | Decoding brain-fast (codec 4), added later from §6.5 alone: model masks 0x003F, 0x01CB, and 0x0155 at tb=16, 19, and 20 | pass, byte-for-byte identical to the reference implementation |
 | Undoing the x86-64 transform (transform 3), added later from §9 alone: one synthetic file and 28 real programs | pass |
 | Brain codec priming (§6.4.11, Appendix B), added later from the specification alone: codecs 3 and 4, blocks of 1 KiB to 260 KiB | pass, byte-for-byte identical to the reference implementation |
+| zstd-primed (codec 5), added later from §6.6 alone: a 1 KiB block, a block holding 15 small files, and one codec 5 block among the 26 blocks of an archive of 231 programs | pass |
+| Undoing the x86-64 split transform (transform 4), added later from §9 alone: two synthetic files (B = 23 and 24) and 155 real programs (B = 23, 24, and 26) | pass |
 | Undoing the x86 and ARM64 file transforms | pass |
 | Deduplicated chunk references (including references across blocks) | pass |
 | Encryption (Argon2id + BLAKE3 derive_key + XChaCha20-Poly1305), rejecting a wrong password | pass |
 | Ed25519 signature verification, rejecting a mismatched public key or an unsigned file | pass |
 | One-byte tampering tests (block, catalog, header, trailer, signature) | all rejected at the expected step |
 
-About 20 unclear points found during this check (a miscalculated LZMA2 dictionary limit, the base of the chunk reference delta, the length of encrypted store blocks, the signature key comparison, password normalization, and others) have all been fixed in this edition.
+About 20 unclear points found during this check (a miscalculated LZMA2 dictionary limit, the base of the chunk reference delta, the length of encrypted store blocks, the signature key comparison, password normalization, and others) have all been fixed in this edition. Adding codec 5 and transform 4 turned up about ten more (the dictionary ID rule, how E9 is treated, the reason the decoder retraces the encoder, B for files over 2 GiB, and others), which are fixed as well.
 
 ## Appendix B. Priming data
 
-Version 1 of the priming data used by §6.4.11 is the file `prime/v1.txt` in the repository: 75,598 bytes, BLAKE3-256 `05f3a9a79ebd0a489559afc99ece7634838fe5b11aa13f84d5030cb693c1b1c2`. P = 1 always means this version; a later version would need a new codec id or flag. Decoders MUST use exactly these bytes. A decoder that cannot load them MUST reject primed blocks; archives without primed blocks do not need the file.
+Version 1 of the priming data used by §6.4.11 and §6.6 is the file `prime/v1.txt` in the repository: 75,598 bytes, BLAKE3-256 `05f3a9a79ebd0a489559afc99ece7634838fe5b11aa13f84d5030cb693c1b1c2`. P = 1 and codec 5 always mean this version; a later version would need new codec ids or flags. Decoders MUST use exactly these bytes. A decoder that cannot load them MUST reject primed blocks (P = 1, or codec 5); archives without primed blocks do not need the file.
 
 It is UTF-8 text with LF line ends, written for this purpose: sample emails, notices, articles, stories, and instructions in English and Korean; shorter passages in Japanese, Chinese, Spanish, Portuguese, French, and German; source code in about twenty programming languages; and common data formats (JSON, XML, CSV, YAML, TOML, Markdown, log lines). It is part of this specification and is released under the same MIT license.
