@@ -2,6 +2,7 @@
 
 use crate::format::*;
 use anyhow::{Result, anyhow, bail, ensure};
+#[cfg(not(target_arch = "wasm32"))]
 use liblzma::stream::{Action, Filters, LzmaOptions, Status, Stream};
 
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +45,9 @@ pub fn compress(raw: &[u8], plan: Plan) -> Result<(u8, Vec<u8>)> {
         Plan::Store => return Ok((CODEC_STORE, raw.to_vec())),
         Plan::Zstd(l) => zstd_block(raw, l)?,
         Plan::Lzma2(p) => (CODEC_LZMA2, lzma2_compress(raw, p)?),
+        #[cfg(target_arch = "wasm32")]
+        Plan::Auto { zstd, .. } => zstd_block(raw, zstd)?,
+        #[cfg(not(target_arch = "wasm32"))]
         Plan::Auto { zstd, lzma } => {
             let (a, b) = rayon::join(|| zstd_block(raw, zstd), || lzma2_compress(raw, lzma));
             let (a, b) = (a?, b?);
@@ -139,6 +143,48 @@ pub fn lzma2_dict(p: u8) -> u32 {
 }
 pub const LZMA2_MAX_PROP: u8 = 32; // dictionary 256 MiB
 
+#[cfg(target_arch = "wasm32")]
+fn lzma2_compress(_raw: &[u8], _preset: u32) -> Result<Vec<u8>> {
+    bail!("LZMA2 compression is not available in the WebAssembly build (use zstd or a brain codec)")
+}
+
+/// Pure-Rust LZMA2 decoding for the WebAssembly build (liblzma is C code that needs a libc).
+#[cfg(target_arch = "wasm32")]
+fn lzma2_decompress(stored: &[u8], raw_len: usize) -> Result<Vec<u8>> {
+    /// Stops the decoder as soon as it produces more than the declared size.
+    struct Capped {
+        out: Vec<u8>,
+        cap: usize,
+    }
+    impl std::io::Write for Capped {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            if self.out.len() + b.len() > self.cap {
+                return Err(std::io::Error::other("LZMA2 output larger than declared"));
+            }
+            self.out.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    ensure!(!stored.is_empty(), "empty LZMA2 block");
+    let p = stored[0];
+    ensure!(p <= LZMA2_MAX_PROP, "LZMA2 dictionary larger than allowed");
+    let mut input = std::io::Cursor::new(&stored[1..]);
+    let mut w = Capped {
+        out: Vec::with_capacity(raw_len),
+        cap: raw_len,
+    };
+    lzma_rs::lzma2_decompress(&mut input, &mut w).map_err(|e| anyhow!("LZMA2: {e:?}"))?;
+    ensure!(
+        input.position() as usize == stored.len() - 1,
+        "trailing bytes after LZMA2 stream"
+    );
+    Ok(w.out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn lzma2_compress(raw: &[u8], preset: u32) -> Result<Vec<u8>> {
     let mut opts = LzmaOptions::new_preset(preset)?;
     let need = raw.len().max(4096) as u64;
@@ -165,6 +211,7 @@ fn lzma2_compress(raw: &[u8], preset: u32) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn lzma2_decompress(stored: &[u8], raw_len: usize) -> Result<Vec<u8>> {
     ensure!(!stored.is_empty(), "empty LZMA2 block");
     let p = stored[0];

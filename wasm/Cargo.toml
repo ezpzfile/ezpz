@@ -1,0 +1,17 @@
+[package]
+name = "ezpz-wasm"
+version = "0.5.0"
+edition = "2024"
+description = "WebAssembly build of ezpz: open, extract, and create .ezpz archives in a browser"
+license = "MIT"
+repository = "https://github.com/ezpzfile/ezpz"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.104"
+ezpz = { path = ".." }
+js-sys = "0.3"
+wasm-bindgen = "=0.2.129"

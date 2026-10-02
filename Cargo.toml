@@ -1,6 +1,6 @@
 [package]
 name = "ezpz"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Reference implementation of the .ezpz archive format (with a learning 'brain' codec)"
 license = "MIT"
@@ -9,23 +9,44 @@ readme = "README.md"
 keywords = ["compression", "archive", "file-format", "context-mixing"]
 categories = ["compression", "command-line-utilities"]
 
+[lib]
+name = "ezpz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ezpz"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.104"
 argon2 = "0.5"
 blake3 = "1.8.7"
 chacha20poly1305 = "0.10"
-clap = { version = "4.6.7", features = ["derive"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 fastcdc = "3"
-filetime = "0.2.29"
 hex = "0.4.3"
-liblzma = { version = "0.4.8", features = ["static", "parallel"] }
 rand = "0.8"
 rayon = "1.12.0"
-rpassword = "7.5.4"
 unicode-normalization = "0.1.25"
+
+# Command-line tool and file system (not needed by the WebAssembly build)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+filetime = "0.2.29"
+liblzma = { version = "0.4.8", features = ["static", "parallel"] }
+rpassword = "7.5.4"
 walkdir = "2.5.0"
 zstd = { version = "0.13", features = ["zstdmt"] }
+
+# WebAssembly: zstd is compiled to wasm with clang, LZMA2 blocks are decoded in pure Rust
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+lzma-rs = "0.3"
+zstd = { version = "0.13", default-features = false }
+
+[workspace]
+members = [".", "wasm"]
+default-members = ["."]
 
 [profile.release]
 opt-level = 3

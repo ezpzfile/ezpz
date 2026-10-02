@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/dotezpz.svg" width="88" alt=".ezpz file icon"></p>
+
 # ezpz: reference implementation of the `.ezpz` archive format
 
 English | [한국어](README.ko.md)
@@ -6,8 +8,14 @@ English | [한국어](README.ko.md)
 
 - Specification: [SPEC.md](SPEC.md)
 - Benchmark: [BENCHMARK.md](BENCHMARK.md)
+- In a browser: [web/](web/README.md) opens, extracts, and creates `.ezpz` archives with the WebAssembly build, without uploading anything
 
 ## Results at a glance
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/chart-sizes-dark.svg">
+  <img src="assets/chart-sizes-light.svg" width="780" alt="Bar chart of archive size as a share of the original on five data sets, for zip -9, 7z -mx9, the ezpz default level, and ezpz -l 11. ezpz -l 11 is the smallest on all five. For example, 100 MB of Wikipedia text becomes 20.5 MB with ezpz -l 11 and 24.9 MB with 7z.">
+</picture>
 
 Archive sizes from the two brain codec settings, next to the best settings of xz and 7z. `--max` uses the fast brain codec. `-l 11` uses the full one and is 1.6 to 4 times slower. In parentheses: each ezpz size compared with whichever of xz and 7z made the smaller file.
 
@@ -18,6 +26,11 @@ Archive sizes from the two brain codec settings, next to the best settings of xz
 | Python install folder | 53.2 MB | 9.1 MB | 9.1 MB | 9.0 MB (0.8% smaller than 7z -mx9) | **7.9 MB** (12.7% smaller than 7z -mx9) |
 | Backup of three Python versions | 158.2 MB | 24.3 MB | 23.7 MB | 26.4 MB (11.5% larger than 7z -mx9) | **23.1 MB** (2.6% smaller than 7z -mx9) |
 | Linux executables | 104.9 MB | 23.1 MB | 20.9 MB | 22.3 MB (6.8% larger than 7z -mx9) | **19.8 MB** (5.1% smaller than 7z -mx9) |
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/chart-small-dark.svg">
+  <img src="assets/chart-small-light.svg" width="780" alt="Bar chart of the total size of 15 small files compressed one by one. zip -9 86.2 KB, gzip -9 84.1 KB, zstd -19 80.6 KB, 7z -mx9 80.3 KB, ezpz default 79.8 KB, xz -9e 79.3 KB, ezpz --max 63.5 KB, ezpz -l 11 62.6 KB.">
+</picture>
 
 On text, `--max` keeps most of the lead. On program files and backups it ends up about as large as 7z or larger, and `-l 11` is the setting that stays ahead, now on executables too. Small files show the biggest gap: across 15 files of 4 to 35 KB, `--max` is 19.9% smaller than xz -9e and 26.4% smaller than zip -9, and even the default level is 7.5% smaller than zip -9. The default level produces archives about the size of tar.zst -19 and can pull a single file out in under 0.1 s. The full numbers are in [BENCHMARK.md](BENCHMARK.md).
 
@@ -73,20 +86,35 @@ ezpz info project.ezpz
 
 Other useful options: `-j N` (number of threads), `--block-size MiB`, `--codec zstd|lzma2|brain|brain-fast|store`, `--no-dedup`, `--no-filter`, `--hash-len 0|16|32`, `-f/--force` (overwrite existing files), and `--unsafe-links` (also create symbolic links that point outside the target folder).
 
+## In a browser
+
+The [`web/`](web/README.md) folder holds a page that opens, extracts, and creates `.ezpz` archives in a browser, using a WebAssembly build of this code. Nothing is uploaded: the page reads and writes files on your device.
+
+- Open `web/dist/ezpz.html` straight from the disk; it is one file with everything inside.
+- Or serve the folder (`python3 -m http.server -d web`) and open `index.html`.
+- To use it on your own site, take `web/pkg/` (the WebAssembly module and its JavaScript glue) and `web/worker.js`. The API is in [web/README.md](web/README.md).
+
+The browser build reads every archive the command-line tool writes. It has no LZMA2 encoder, so level 9 there compresses with zstd alone, and it works on one core. At every level except 9, the blocks it writes are byte for byte the same as the command-line tool's.
+
 ## Source layout
 
 | File | Purpose |
 |---|---|
+| `src/lib.rs` | the library that the command-line tool and the WebAssembly build share |
+| `src/main.rs` | the command-line tool |
 | `src/format.rs` | byte layout of the header, frames, trailer, and signature section; varints; path rules |
 | `src/index.rs` | encoding and decoding of the block table and the catalog (a column-oriented index) |
 | `src/codec.rs` | glue for the store, zstd, LZMA2, and brain codecs |
 | `src/brain.rs` | brain codecs: context models (9, or 6 in brain-fast), a match model, neural mixers, APM stages, and an arithmetic coder |
 | `src/filter.rs` | executable transforms (x86 E8/E9, x86-64 with RIP-relative addresses in place or moved to the end of the file, ARM64 BL) |
 | `src/classify.rs` | file classification (executable / already compressed / other) |
-| `src/create.rs` | archiver: classify, sort, split into content-defined chunks, deduplicate, compress blocks in parallel |
-| `src/archive.rs` | extractor: verification, block cache, random access, safe extraction |
+| `src/create.rs` | archiver: classify, sort, split into content-defined chunks, deduplicate, compress blocks in parallel (from files or from memory) |
+| `src/archive.rs` | extractor: verification, block cache, random access, safe extraction (from a file or from memory) |
 | `src/crypto.rs` | Argon2id and XChaCha20-Poly1305 |
 | `prime/v1.txt` | built-in priming data for the brain codecs and the zstd dictionary (part of the format) |
+| `wasm/` | WebAssembly bindings (open, list, extract, verify, create) |
+| `web/` | the browser page, its Web Worker, the built package (`web/pkg`), and the single-file page (`web/dist`) |
+| `assets/` | the logo and the README charts (drawn by `bench/charts.py` from the benchmark results) |
 
 ## Independent implementation
 
@@ -107,6 +135,7 @@ To decode encrypted archives, also install `argon2-cffi` and `pynacl` and pass `
 ```bash
 cargo test --release      # unit tests (format, rejection of tampered indexes, path attacks, ...)
 tests/e2e.sh              # end-to-end CLI scenarios: round trips, tampering, encryption, signatures
+node web/test.mjs         # the WebAssembly build: reads every test vector, creates and reopens archives
 ```
 
 ## Limitations
@@ -120,4 +149,8 @@ tests/e2e.sh              # end-to-end CLI scenarios: round trips, tampering, en
 
 ## License
 
-Released under the [MIT License](LICENSE). You are free to build compatible implementations in other languages from the specification ([SPEC.md](SPEC.md)).
+Released under the [MIT License](LICENSE). You are free to use, change, share, and sell it, and to build compatible implementations from the specification ([SPEC.md](SPEC.md)). The MIT License requires the copyright notice, which names EZPZ File and its website, to stay with every copy of the code.
+
+If you use ezpz or its WebAssembly build in a product, website, or service, please also credit EZPZ File somewhere your users can see it, such as an about page, the credits, or a footer:
+
+    Powered by EZPZ File (https://ezpzfile.com)

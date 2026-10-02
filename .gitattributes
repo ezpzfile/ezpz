@@ -2,3 +2,7 @@
 # test vectors are compared with their inputs), so git must never convert line endings.
 prime/** -text
 testvectors/** -text
+
+# Built by web/build.sh and committed so the page works without a Rust toolchain.
+web/pkg/** linguist-generated
+web/dist/** linguist-generated -diff

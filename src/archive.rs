@@ -1,4 +1,5 @@
 //! Archive reader: open, verify, random-access file reads, extraction.
+//! An archive can be read from a file or from bytes in memory (the WebAssembly build).
 
 use crate::format::*;
 use crate::index::*;
@@ -6,13 +7,49 @@ use crate::{codec, crypto, filter};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::{self, File};
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Where the archive bytes come from.
+pub enum Source {
+    #[cfg(not(target_arch = "wasm32"))]
+    File(File),
+    Mem(Vec<u8>),
+}
+
+impl Source {
+    fn len(&self) -> io::Result<u64> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Source::File(f) => Ok(f.metadata()?.len()),
+            Source::Mem(v) => Ok(v.len() as u64),
+        }
+    }
+
+    fn read_at(&self, buf: &mut [u8], off: u64) -> io::Result<()> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Source::File(f) => read_at(f, buf, off),
+            Source::Mem(v) => {
+                let start = usize::try_from(off).map_err(|_| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+                let end = start
+                    .checked_add(buf.len())
+                    .filter(|&e| e <= v.len())
+                    .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+                buf.copy_from_slice(&v[start..end]);
+                Ok(())
+            }
+        }
+    }
+}
+
 pub struct Archive {
-    f: File,
+    src: Source,
     pub len: u64,
     pub header: Header,
     #[allow(dead_code)]
@@ -30,6 +67,7 @@ pub struct Archive {
     pub chunks: Option<ChunkMap>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_at(f: &File, buf: &mut [u8], off: u64) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -55,27 +93,51 @@ impl Archive {
     /// Opens and authenticates the archive structure. The catalog is decoded only if the archive is
     /// unencrypted or `password` yields a key. With `need_catalog=false` an encrypted archive can be
     /// structurally verified without the password.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(
         path: &Path,
         password: &mut dyn FnMut() -> Result<Vec<u8>>,
         need_catalog: bool,
     ) -> Result<Archive> {
         let f = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-        let len = f.metadata()?.len();
+        Self::open_source(Source::File(f), password, need_catalog)
+    }
+
+    /// Opens an archive held in memory. Without a password, an encrypted archive is opened
+    /// structurally only (`has_catalog()` is false): block hashes and the signature can still
+    /// be checked, but nothing can be listed or extracted.
+    pub fn from_bytes(data: Vec<u8>, password: Option<&[u8]>) -> Result<Archive> {
+        let need = password.is_some();
+        let pw = password.map(|p| p.to_vec());
+        Self::open_source(
+            Source::Mem(data),
+            &mut || pw.clone().ok_or_else(|| anyhow!("password required")),
+            need,
+        )
+    }
+
+    /// Opens and authenticates the archive structure from any source (see `open`).
+    pub fn open_source(
+        src: Source,
+        password: &mut dyn FnMut() -> Result<Vec<u8>>,
+        need_catalog: bool,
+    ) -> Result<Archive> {
+        let f = &src;
+        let len = f.len()?;
         ensure!(
             len >= (HEADER_FIXED_LEN + TRAILER_LEN) as u64,
             "file too small to be an .ezpz archive"
         );
 
         let mut fixed = [0u8; HEADER_FIXED_LEN];
-        read_at(&f, &mut fixed, 0)?;
+        f.read_at(&mut fixed, 0)?;
         let ext_len = Header::ext_len(&fixed)? as usize;
         let mut hb = vec![0u8; HEADER_FIXED_LEN + ext_len];
-        read_at(&f, &mut hb, 0)?;
+        f.read_at(&mut hb, 0)?;
         let header = Header::parse(hb)?;
 
         let mut tb = [0u8; TRAILER_LEN];
-        read_at(&f, &mut tb, len - TRAILER_LEN as u64)?;
+        f.read_at(&mut tb, len - TRAILER_LEN as u64)?;
         let trailer = Trailer::decode(&tb)?;
         ensure!(
             trailer.archive_len == len,
@@ -98,7 +160,7 @@ impl Archive {
 
         // Index region = block table frame + catalog frame. root_hash covers header + index region.
         let mut region = vec![0u8; (index_end - trailer.index_offset) as usize];
-        read_at(&f, &mut region, trailer.index_offset)?;
+        f.read_at(&mut region, trailer.index_offset)?;
         let digest = root_hash(&header.bytes, &region);
         ensure!(
             digest == trailer.root_hash,
@@ -107,7 +169,7 @@ impl Archive {
 
         let signature = if signed {
             let mut sb = [0u8; SIG_SECTION_LEN];
-            read_at(&f, &mut sb, index_end)?;
+            f.read_at(&mut sb, index_end)?;
             let s = SigSection::decode(&sb)?;
             let vk = ed25519_dalek::VerifyingKey::from_bytes(&s.public_key)
                 .map_err(|_| anyhow!("bad public key"))?;
@@ -167,7 +229,7 @@ impl Archive {
         let catalog_offset = trailer.index_offset + t_end as u64;
 
         let mut a = Archive {
-            f,
+            src,
             len,
             header,
             trailer,
@@ -235,7 +297,7 @@ impl Archive {
     pub fn read_block(&self, id: u32, decode: bool) -> Result<Vec<u8>> {
         let b = &self.table.blocks[id as usize];
         let mut buf = vec![0u8; FRAME_HEADER_LEN + b.stored_len as usize];
-        read_at(&self.f, &mut buf, self.block_offsets[id as usize])?;
+        self.src.read_at(&mut buf, self.block_offsets[id as usize])?;
         ensure!(
             blake3::hash(&buf).as_bytes() == &b.hash,
             "block {id}: checksum mismatch (data damaged or tampered with)"
@@ -272,11 +334,38 @@ impl Archive {
             .with_context(|| format!("block {id}"))
     }
 
+    /// Codec of one block, from its frame header (not hash-checked; for display).
+    pub fn block_codec(&self, id: u32) -> Result<u8> {
+        let mut fh = [0u8; FRAME_HEADER_LEN];
+        self.src.read_at(&mut fh, self.block_offsets[id as usize])?;
+        Ok(FrameHeader::decode(&fh, BLOCK_MAGIC)?.codec)
+    }
+
     pub fn find(&self, path: &str) -> Option<&Entry> {
         let es = &self.catalog().entries;
         es.binary_search_by(|e| e.path.as_bytes().cmp(path.as_bytes()))
             .ok()
             .map(|i| &es[i])
+    }
+
+    /// Whole content of one file, hash checked. For many files, keep a `BlockCache` (or another
+    /// `BlockSource`) so that blocks shared between files are decoded once.
+    pub fn read_file(&self, e: &Entry) -> Result<Vec<u8>> {
+        let mut cache = BlockCache::new(self, access_sequence(self, &[e]), 1);
+        let mut out = Vec::new();
+        write_content(self, &mut cache, e, &mut out)?;
+        Ok(out)
+    }
+}
+
+/// Gives decoded blocks to `write_content`.
+pub trait BlockSource {
+    fn block(&mut self, id: u32) -> Result<Arc<Vec<u8>>>;
+}
+
+impl BlockSource for BlockCache<'_> {
+    fn block(&mut self, id: u32) -> Result<Arc<Vec<u8>>> {
+        self.get(id)
     }
 }
 
@@ -372,7 +461,7 @@ pub fn access_sequence(ar: &Archive, files: &[&Entry]) -> Vec<u32> {
 /// Streams one file's content to `out`, verifying its hash. Returns bytes written.
 pub fn write_content(
     ar: &Archive,
-    cache: &mut BlockCache,
+    cache: &mut dyn BlockSource,
     e: &Entry,
     out: &mut dyn Write,
 ) -> Result<u64> {
@@ -396,7 +485,7 @@ pub fn write_content(
                 cm.offset[c as usize] as usize,
                 cm.len[c as usize] as usize,
             );
-            let blk = cache.get(b)?;
+            let blk = cache.block(b)?;
             buf.extend_from_slice(&blk[o..o + l]);
         }
         filter::decode(*transform, &mut buf);
@@ -410,7 +499,7 @@ pub fn write_content(
                 cm.offset[c as usize] as usize,
                 cm.len[c as usize] as usize,
             );
-            let blk = cache.get(b)?;
+            let blk = cache.block(b)?;
             let s = &blk[o..o + l];
             hasher.update(s);
             out.write_all(s)?;
@@ -427,6 +516,7 @@ pub fn write_content(
     Ok(n)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct ExtractOptions {
     pub dest: PathBuf,
     pub force: bool,
@@ -435,6 +525,7 @@ pub struct ExtractOptions {
     pub verbose: bool,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn selected<'a>(ar: &'a Archive, filters: &[String]) -> Result<Vec<&'a Entry>> {
     let es = &ar.catalog().entries;
     if filters.is_empty() {
@@ -456,7 +547,8 @@ fn selected<'a>(ar: &'a Archive, filters: &[String]) -> Result<Vec<&'a Entry>> {
     Ok(out)
 }
 
-fn link_is_safe(path: &str, target: &str) -> bool {
+/// True if a symbolic link at `path` pointing to `target` stays inside the extraction folder.
+pub fn link_is_safe(path: &str, target: &str) -> bool {
     if target.starts_with('/') || target.contains('\\') || Path::new(target).is_absolute() {
         return false;
     }
@@ -477,12 +569,12 @@ fn link_is_safe(path: &str, target: &str) -> bool {
     true
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 fn set_mode(p: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = fs::set_permissions(p, fs::Permissions::from_mode(mode));
 }
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
 fn set_mode(p: &Path, mode: u32) {
     if mode & 0o200 == 0 {
         if let Ok(m) = fs::metadata(p) {
@@ -499,6 +591,7 @@ pub struct ExtractStats {
     pub skipped_links: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn extract(ar: &Archive, filters: &[String], o: &ExtractOptions) -> Result<ExtractStats> {
     let sel = selected(ar, filters)?;
     let mut st = ExtractStats {

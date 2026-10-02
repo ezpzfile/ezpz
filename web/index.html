@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ezpz: open and create .ezpz archives</title>
+<meta name="description" content="Open, extract, and create .ezpz archives in your browser. Nothing is uploaded.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 97 117'%3E%3Cpath d='M0 117H97V23.7111L73.2889 0.0577579L0 0V117Z' fill='%230155FF'/%3E%3Cpath d='M73.2888 23.7111V0L96.9999 23.7111H73.2888Z' fill='%2300C8FF'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f6f8fc;
+  --card: #ffffff;
+  --fg: #111827;
+  --muted: #5b6475;
+  --border: #dfe4ee;
+  --accent: #0155ff;
+  --accent-2: #00c8ff;
+  --accent-fg: #ffffff;
+  --soft: #eef3ff;
+  --danger: #b42318;
+  --danger-soft: #fdecea;
+  --ok: #067647;
+  --ok-soft: #e7f6ee;
+  --radius: 14px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --fg: #e6edf3;
+    --muted: #9aa4b2;
+    --border: #2b3340;
+    --accent: #3d7bff;
+    --accent-2: #2fd3ff;
+    --soft: #172338;
+    --danger: #ff8a80;
+    --danger-soft: #3a1d1d;
+    --ok: #6fdc9b;
+    --ok-soft: #13301f;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", "Apple SD Gothic Neo", sans-serif;
+  overflow-wrap: break-word;
+}
+/* Korean lines break between words, not inside them */
+:lang(ko) { word-break: keep-all; }
+a { color: var(--accent); }
+.wrap { max-width: 920px; margin: 0 auto; padding: 0 16px; }
+header { padding: 28px 0 8px; }
+.brand { display: flex; align-items: center; gap: 14px; }
+.brand svg { width: 44px; height: auto; flex: none; }
+.brand h1 { font-size: 26px; margin: 0; letter-spacing: -0.01em; }
+.brand p { margin: 2px 0 0; color: var(--muted); }
+.lang { margin-left: auto; display: flex; gap: 4px; flex: none; align-self: flex-start; }
+.lang button { white-space: nowrap; font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--muted); cursor: pointer; }
+.lang button[aria-pressed="true"] { color: var(--fg); border-color: var(--fg); }
+.tabs { display: flex; gap: 6px; margin: 20px 0 14px; }
+.tabs button { font: inherit; font-weight: 600; padding: 9px 18px; border-radius: 999px; border: 1px solid var(--border); background: var(--card); color: var(--muted); cursor: pointer; }
+.tabs button[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 14px; }
+.drop { border: 2px dashed var(--border); border-radius: var(--radius); padding: 34px 16px; text-align: center; transition: border-color .15s, background .15s; }
+.drop.over { border-color: var(--accent); background: var(--soft); }
+.drop strong { display: block; font-size: 17px; margin-bottom: 6px; }
+.drop .or { color: var(--muted); margin: 6px 0 12px; }
+.btn { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 10px; border: 1px solid var(--border); background: var(--card); color: var(--fg); cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.small { padding: 4px 10px; font-size: 13px; font-weight: 500; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.muted { color: var(--muted); }
+.note { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+.alert { border-radius: 10px; padding: 10px 14px; margin: 12px 0 0; }
+.alert.err { background: var(--danger-soft); color: var(--danger); }
+.alert.ok { background: var(--ok-soft); color: var(--ok); }
+.badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--soft); color: var(--accent); }
+.summary h2 { font-size: 18px; margin: 0 0 4px; word-break: break-all; }
+.big { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+th { color: var(--muted); font-weight: 600; font-size: 13px; }
+td.num, th.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+td.name { word-break: break-all; }
+.list { max-height: 420px; overflow: auto; margin-top: 12px; }
+.levels { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; margin: 8px 0 4px; }
+.level { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; cursor: pointer; display: block; }
+.level input { margin: 0 6px 0 0; accent-color: var(--accent); }
+.level b { font-size: 15px; }
+.level span { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.level:has(input:checked) { border-color: var(--accent); background: var(--soft); }
+label.field { display: block; margin-top: 14px; font-weight: 600; }
+label.field input { display: block; width: 100%; max-width: 360px; margin-top: 6px; font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.bar { height: 8px; border-radius: 999px; background: var(--soft); overflow: hidden; margin-top: 14px; }
+.bar > div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
+.bar.busy > div { width: 35%; animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { 0% { margin-left: -35%; } 100% { margin-left: 100%; } }
+footer { padding: 18px 0 40px; color: var(--muted); font-size: 13px; }
+footer a { color: var(--muted); }
+[hidden] { display: none !important; }
+@media (max-width: 560px) { .brand { flex-wrap: wrap; } .brand h1 { font-size: 22px; } .brand p { font-size: 14px; } th.date, td.date { display: none; } }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <div class="brand">
+    <svg viewBox="0 0 97 117" aria-hidden="true"><path d="M0 117H97V23.7111L73.2889 0.0577579L0 0V117Z" fill="#0155FF"/><path d="M73.2888 23.7111V0L96.9999 23.7111H73.2888Z" fill="#00C8FF"/><path d="M68.7717 100.62H70.9472V98.4441H73.1227V96.2686H75.2981V94.0931H77.4736V91.9177H68.7717V87.5667H84V94.0931H81.8246V96.2686H79.6491V98.4441H77.4736V100.62H84V104.97H68.7717V100.62Z" fill="white"/><path d="M55.7132 100.62H62.2397V91.9177H55.7132V100.62ZM55.7132 89.7422H57.8887V87.5667H64.4151V89.7422H66.5906V102.795H64.4151V104.97H55.7132V109.321H51.3623V87.5667H55.7132V89.7422Z" fill="white"/><path d="M33.9529 100.62H36.1284V98.4441H38.3038V96.2686H40.4793V94.0931H42.6548V91.9177H33.9529V87.5667H49.1812V94.0931H47.0057V96.2686H44.8302V98.4441H42.6548V100.62H49.1812V104.97H33.9529V100.62Z" fill="white"/><path d="M16.5435 89.7422H18.7189V87.5667H29.5963V89.7422H31.7718V98.4441H20.8944V100.62H31.7718V102.795H29.5963V104.97H18.7189V102.795H16.5435V89.7422ZM20.8944 94.0931H27.4208V91.9177H20.8944V94.0931Z" fill="white"/><path d="M10 100.62H14.3509V104.971H10V100.62Z" fill="white"/></svg>
+    <div>
+      <h1>.ezpz</h1>
+      <p data-t="tagline">Open and create .ezpz archives in your browser. Nothing is uploaded.</p>
+    </div>
+    <div class="lang" role="group" aria-label="Language">
+      <button type="button" data-lang="en">EN</button>
+      <button type="button" data-lang="ko">한국어</button>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" id="tab-open" aria-selected="true" data-t="tabOpen">Open</button>
+    <button type="button" role="tab" id="tab-create" aria-selected="false" data-t="tabCreate">Create</button>
+  </div>
+
+  <section id="pane-open">
+    <div class="card">
+      <div class="drop" id="open-drop">
+        <strong data-t="openDrop">Drop a .ezpz file here</strong>
+        <div class="or" data-t="or">or</div>
+        <button type="button" class="btn primary" id="open-pick" data-t="chooseFile">Choose a file</button>
+        <input type="file" id="open-input" accept=".ezpz" hidden>
+      </div>
+      <form id="pw-form" hidden>
+        <label class="field"><span data-t="pwNeeded">This archive is encrypted. Enter its password.</span>
+          <input type="password" id="pw-input" autocomplete="off">
+        </label>
+        <div class="row" style="margin-top:10px"><button class="btn primary" type="submit" data-t="openBtn">Open</button></div>
+      </form>
+      <div id="open-msg"></div>
+    </div>
+
+    <div class="card summary" id="open-result" hidden>
+      <h2 id="ar-name"></h2>
+      <div class="big" id="ar-sizes"></div>
+      <div class="muted" id="ar-meta"></div>
+      <div class="row" id="ar-badges" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:14px">
+        <button type="button" class="btn primary" id="dl-all" data-t="downloadAll">Download all (.zip)</button>
+        <button type="button" class="btn" id="verify-btn" data-t="verify">Check integrity</button>
+      </div>
+      <div class="bar" id="open-bar" hidden><div></div></div>
+      <div id="open-msg2"></div>
+      <div class="list">
+        <table>
+          <thead><tr><th data-t="colName">Name</th><th class="num" data-t="colSize">Size</th><th class="date" data-t="colDate">Modified</th><th></th></tr></thead>
+          <tbody id="ar-files"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="pane-create" hidden>
+    <div class="card">
+      <div class="drop" id="create-drop">
+        <strong data-t="createDrop">Drop files or folders here</strong>
+        <div class="or" data-t="or">or</div>
+        <div class="row" style="justify-content:center">
+          <button type="button" class="btn primary" id="add-files" data-t="addFiles">Add files</button>
+          <button type="button" class="btn" id="add-folder" data-t="addFolder">Add a folder</button>
+        </div>
+        <input type="file" id="files-input" multiple hidden>
+        <input type="file" id="folder-input" webkitdirectory hidden>
+      </div>
+      <div id="sel" hidden>
+        <div class="row" style="margin-top:14px">
+          <span id="sel-count" class="big"></span>
+          <button type="button" class="btn small" id="sel-clear" data-t="clear">Clear</button>
+        </div>
+        <div class="list" style="max-height:220px"><table><tbody id="sel-list"></tbody></table></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="font-weight:600" data-t="level">Compression</div>
+      <div class="levels" id="levels">
+        <label class="level"><input type="radio" name="level" value="3"><b data-t="l3">Fast</b><span data-t="l3d">Quickest. A bigger file.</span></label>
+        <label class="level"><input type="radio" name="level" value="7" checked><b data-t="l7">Default</b><span data-t="l7d">Small, and quick to open.</span></label>
+        <label class="level"><input type="radio" name="level" value="10"><b data-t="l10">Max</b><span data-t="l10d">Smaller. Slow to make and open.</span></label>
+        <label class="level"><input type="radio" name="level" value="11"><b data-t="l11">Smallest</b><span data-t="l11d">Smallest. Slowest.</span></label>
+      </div>
+      <p class="note" data-t="brainNote">Max and Smallest use the brain codec, which is slow in a browser too: under 1 MB per second.</p>
+      <label class="field"><span data-t="pwOptional">Password (optional, hides file names too)</span>
+        <input type="password" id="create-pw" autocomplete="new-password">
+      </label>
+      <label class="field"><span data-t="archiveName">Archive name</span>
+        <input type="text" id="create-name" value="archive">
+      </label>
+      <div class="row" style="margin-top:16px">
+        <button type="button" class="btn primary" id="create-btn" data-t="createBtn" disabled>Create .ezpz</button>
+        <span class="muted" id="create-time"></span>
+      </div>
+      <div class="bar" id="create-bar" hidden><div></div></div>
+      <div id="create-msg"></div>
+    </div>
+  </section>
+</main>
+
+<footer class="wrap">
+  <div>Powered by <a href="https://ezpzfile.com">EZPZ File</a> (https://ezpzfile.com) · <a href="https://github.com/ezpzfile/ezpz" data-t="source">Source code</a> (MIT) · ezpz <span id="ver"></span></div>
+  <div data-t="privacy">Everything runs on this device. Your files never leave it.</div>
+</footer>
+
+<script type="module">
+// The build script (web/build.sh) fills these in for the single-file page web/dist/ezpz.html.
+const WASM_B64 = null;
+const WORKER_SRC = null;
+
+const T = {
+  en: {
+    tagline: 'Open and create .ezpz archives in your browser. Nothing is uploaded.',
+    tabOpen: 'Open', tabCreate: 'Create', openDrop: 'Drop a .ezpz file here', or: 'or',
+    chooseFile: 'Choose a file', pwNeeded: 'This archive is encrypted. Enter its password.', openBtn: 'Open',
+    downloadAll: 'Download all (.zip)', verify: 'Check integrity', colName: 'Name', colSize: 'Size', colDate: 'Modified',
+    createDrop: 'Drop files or folders here', addFiles: 'Add files', addFolder: 'Add a folder', clear: 'Clear',
+    level: 'Compression', l3: 'Fast', l3d: 'Quickest. A bigger file.', l7: 'Default', l7d: 'Small, and quick to open.',
+    l10: 'Max', l10d: 'Smaller. Slow to make and open.', l11: 'Smallest', l11d: 'Smallest. Slowest.',
+    brainNote: 'Max and Smallest use the brain codec, which is slow in a browser too: under 1 MB per second.',
+    pwOptional: 'Password (optional, hides file names too)', archiveName: 'Archive name', createBtn: 'Create .ezpz',
+    source: 'Source code', privacy: 'Everything runs on this device. Your files never leave it.',
+    loading: 'Loading…', opening: 'Opening…', notEzpz: 'This is not an .ezpz file.',
+    files: (n) => `${n} file${n === 1 ? '' : 's'}`, smaller: (p) => `${p}% smaller`, larger: (p) => `${p}% larger`,
+    encrypted: 'Encrypted', signed: 'Signed', key: 'key',
+    created: (d, who) => `Created ${d} by ${who}`, extracting: (a, b) => `Extracting ${a} of ${b}…`,
+    zipped: (n) => `Saved ${n} files as a .zip.`, verifyOk: (b, f) => `All ${b} blocks and ${f} files are intact.`,
+    verifyBad: 'Damage found:', verifyNoPw: (b) => `All ${b} blocks are intact. Enter the password to check the files too.`,
+    download: 'Download', selected: (n, s) => `${n} files, ${s}`, working: 'Compressing…',
+    done: (name, a, b, p) => `Saved ${name}: ${a} → ${b} (${p})`, elapsed: (s) => `${s} s`,
+    zipLimit: 'Too large for a .zip download. Download the files one by one.', moreRows: (n) => `…and ${n} more`,
+    symlinkSkipped: (n) => `${n} symbolic link(s) are not included in the .zip.`, wrongPw: 'Wrong password, or the archive is damaged.',
+  },
+  ko: {
+    tagline: '.ezpz 압축 파일을 브라우저에서 풀고 만들어요. 아무것도 업로드하지 않아요.',
+    tabOpen: '풀기', tabCreate: '만들기', openDrop: '.ezpz 파일을 여기에 놓으세요', or: '또는',
+    chooseFile: '파일 고르기', pwNeeded: '암호가 걸린 압축 파일이에요. 비밀번호를 입력하세요.', openBtn: '열기',
+    downloadAll: '모두 받기 (.zip)', verify: '손상 검사', colName: '이름', colSize: '크기', colDate: '수정한 날',
+    createDrop: '파일이나 폴더를 여기에 놓으세요', addFiles: '파일 추가', addFolder: '폴더 추가', clear: '비우기',
+    level: '압축 방식', l3: '빠르게', l3d: '가장 빨라요. 파일은 조금 커요.', l7: '기본', l7d: '작고 빨리 열려요.',
+    l10: '최대', l10d: '더 작아요. 만들고 여는 게 느려요.', l11: '가장 작게', l11d: '가장 작고 가장 느려요.',
+    brainNote: '최대와 가장 작게는 뇌 코덱을 써서 브라우저에서도 느려요. 1초에 1MB가 안 돼요.',
+    pwOptional: '비밀번호 (선택, 파일 이름도 숨겨요)', archiveName: '압축 파일 이름', createBtn: '.ezpz 만들기',
+    source: '소스 코드', privacy: '모든 작업이 이 기기 안에서 이뤄져요. 파일은 밖으로 나가지 않아요.',
+    loading: '불러오는 중…', opening: '여는 중…', notEzpz: '.ezpz 파일이 아니에요.',
+    files: (n) => `파일 ${n}개`, smaller: (p) => `${p}% 줄어듦`, larger: (p) => `${p}% 커짐`,
+    encrypted: '암호화됨', signed: '서명됨', key: '키',
+    created: (d, who) => `${d}에 만듦 (${who})`, extracting: (a, b) => `${b}개 중 ${a}개 푸는 중…`,
+    zipped: (n) => `파일 ${n}개를 .zip으로 저장했어요.`, verifyOk: (b, f) => `블록 ${b}개와 파일 ${f}개 모두 이상 없어요.`,
+    verifyBad: '손상을 찾았어요:', verifyNoPw: (b) => `블록 ${b}개 모두 이상 없어요. 파일까지 검사하려면 비밀번호를 입력하세요.`,
+    download: '받기', selected: (n, s) => `파일 ${n}개, ${s}`, working: '압축하는 중…',
+    done: (name, a, b, p) => `${name} 저장: ${a} → ${b} (${p})`, elapsed: (s) => `${s}초`,
+    zipLimit: '.zip으로 받기엔 너무 커요. 파일을 하나씩 받아 주세요.', moreRows: (n) => `…외 ${n}개`,
+    symlinkSkipped: (n) => `심볼릭 링크 ${n}개는 .zip에 넣지 않았어요.`, wrongPw: '비밀번호가 틀렸거나 파일이 손상됐어요.',
+  },
+};
+let lang = (localStorageGet('ezpz-lang') || (navigator.language || 'en')).toLowerCase().startsWith('ko') ? 'ko' : 'en';
+const t = (k, ...a) => { const v = T[lang][k]; return typeof v === 'function' ? v(...a) : v; };
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function localStorageSet(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } }
+function applyLang() {
+  document.documentElement.lang = lang;
+  for (const el of document.querySelectorAll('[data-t]')) el.textContent = t(el.dataset.t);
+  for (const b of document.querySelectorAll('.lang button')) b.setAttribute('aria-pressed', String(b.dataset.lang === lang));
+  if (lastOpen) renderArchive(lastOpen);
+  renderSelection();
+}
+for (const b of document.querySelectorAll('.lang button')) b.onclick = () => { lang = b.dataset.lang; localStorageSet('ezpz-lang', lang); applyLang(); };
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+function fmtSize(n) {
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; }
+  return (i === 0 ? n : n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0)) + ' ' + u[i];
+}
+function pctText(raw, packed) {
+  if (!raw) return '';
+  const p = (1 - packed / raw) * 100;
+  return p >= 0 ? t('smaller', p.toFixed(1)) : t('larger', (-p).toFixed(1));
+}
+function fmtDate(sec) {
+  try { return new Date(sec * 1000).toLocaleString(lang === 'ko' ? 'ko-KR' : undefined, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return ''; }
+}
+function msg(el, text, kind) { el.innerHTML = text ? `<div class="alert ${kind || 'err'}">${esc(text)}</div>` : ''; }
+function save(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+}
+
+// ---- worker
+let worker, nextId = 1;
+const pending = new Map();
+function call(op, payload = {}, transfer = [], onProgress) {
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject, onProgress });
+    worker.postMessage({ id, op, ...payload }, transfer);
+  });
+}
+async function startWorker() {
+  worker = WORKER_SRC
+    ? new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })))
+    : new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  worker.onerror = (e) => {
+    const err = new Error(e.message || 'The worker stopped.');
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+  };
+  worker.onmessage = (ev) => {
+    const m = ev.data, p = pending.get(m.id);
+    if (!p) return;
+    if (m.progress) { if (p.onProgress) p.onProgress(...m.progress); return; }
+    pending.delete(m.id);
+    m.ok ? p.resolve(m) : p.reject(new Error(m.error));
+  };
+  const wasm = WASM_B64
+    ? Uint8Array.from(atob(WASM_B64), (c) => c.charCodeAt(0)).buffer
+    : await (await fetch(new URL('./pkg/ezpz_wasm_bg.wasm', import.meta.url))).arrayBuffer();
+  const r = await call('init', { wasm }, [wasm]);
+  $('ver').textContent = r.version;
+}
+const ready = startWorker().catch((e) => msg($('open-msg'), e.message));
+
+// ---- tabs
+function showTab(which) {
+  $('tab-open').setAttribute('aria-selected', String(which === 'open'));
+  $('tab-create').setAttribute('aria-selected', String(which === 'create'));
+  $('pane-open').hidden = which !== 'open';
+  $('pane-create').hidden = which !== 'create';
+}
+$('tab-open').onclick = () => showTab('open');
+$('tab-create').onclick = () => showTab('create');
+
+function dropZone(el, onDrop) {
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('over'); });
+  el.addEventListener('dragleave', () => el.classList.remove('over'));
+  el.addEventListener('drop', (e) => { e.preventDefault(); el.classList.remove('over'); onDrop(e.dataTransfer); });
+}
+
+// ---- open
+let openFile = null, lastOpen = null;
+$('open-pick').onclick = () => $('open-input').click();
+$('open-input').onchange = () => { if ($('open-input').files[0]) openArchive($('open-input').files[0]); $('open-input').value = ''; };
+dropZone($('open-drop'), (dt) => { if (dt.files[0]) openArchive(dt.files[0]); });
+$('pw-form').onsubmit = (e) => { e.preventDefault(); openArchive(openFile, $('pw-input').value); };
+
+async function openArchive(file, password) {
+  openFile = file;
+  msg($('open-msg'), ''); msg($('open-msg2'), '');
+  $('open-result').hidden = true;
+  await ready;
+  const head = new Uint8Array(await file.slice(0, 5).arrayBuffer());
+  if (!(head[0] === 0x89 && head[1] === 0x45 && head[2] === 0x5a && head[3] === 0x50 && head[4] === 0x5a)) { msg($('open-msg'), t('notEzpz')); return; }
+  $('open-msg').innerHTML = `<p class="muted">${esc(t('opening'))}</p>`;
+  try {
+    const bytes = await file.arrayBuffer();
+    const r = await call('open', { bytes, password }, [bytes]);
+    msg($('open-msg'), '');
+    if (r.needsPassword) {
+      $('pw-form').hidden = false;
+      $('pw-input').focus();
+      lastOpen = { ...r, name: file.name, size: file.size };
+      return;
+    }
+    $('pw-form').hidden = true;
+    $('pw-input').value = '';
+    lastOpen = { ...r, name: file.name, size: file.size };
+    renderArchive(lastOpen);
+  } catch (e) {
+    msg($('open-msg'), password !== undefined && /password|decrypt/i.test(e.message) ? t('wrongPw') : e.message);
+  }
+}
+
+function renderArchive(a) {
+  if (a.needsPassword) return;
+  const files = a.entries.filter((e) => e.type === 'file');
+  const total = files.reduce((s, e) => s + e.size, 0);
+  $('ar-name').textContent = a.name;
+  $('ar-sizes').textContent = `${fmtSize(total)} → ${fmtSize(a.size)} (${pctText(total, a.size)})`;
+  const codecs = Object.entries(a.info.blocks || {}).map(([k, v]) => `${k} ×${v}`).join(', ');
+  $('ar-meta').textContent = [t('files', files.length), a.info.created ? t('created', fmtDate(a.info.created), a.info.creator) : '', codecs].filter(Boolean).join(' · ');
+  const badges = [];
+  if (a.encrypted) badges.push(`<span class="badge">${esc(t('encrypted'))}</span>`);
+  if (a.signed) badges.push(`<span class="badge">${esc(t('signed'))} · ${esc(t('key'))} ${esc(a.signerKey.slice(0, 16))}…</span>`);
+  $('ar-badges').innerHTML = badges.join('');
+  const shown = a.entries.filter((e) => e.type !== 'dir').slice(0, 2000);
+  let html = shown.map((e, i) => `<tr><td class="name">${esc(e.path)}${e.type === 'symlink' ? ' → ' + esc(e.target) : ''}</td><td class="num">${e.type === 'file' ? fmtSize(e.size) : ''}</td><td class="date muted">${fmtDate(e.mtime)}</td><td class="num">${e.type === 'file' ? `<button class="btn small" data-i="${i}">${esc(t('download'))}</button>` : ''}</td></tr>`).join('');
+  const rest = a.entries.filter((e) => e.type !== 'dir').length - shown.length;
+  if (rest > 0) html += `<tr><td class="muted" colspan="4">${esc(t('moreRows', rest))}</td></tr>`;
+  $('ar-files').innerHTML = html;
+  for (const b of $('ar-files').querySelectorAll('button[data-i]')) {
+    b.onclick = async () => {
+      const e = shown[Number(b.dataset.i)];
+      try {
+        const r = await call('read', { paths: [e.path] });
+        save(new Blob([r.files[0].data]), e.path.split('/').pop());
+      } catch (err) { msg($('open-msg2'), err.message); }
+    };
+  }
+  $('open-result').hidden = false;
+}
+
+$('verify-btn').onclick = async () => {
+  msg($('open-msg2'), '');
+  const bar = $('open-bar'); bar.hidden = false; bar.classList.add('busy');
+  try {
+    const { report } = await call('verify');
+    if (report.ok) msg($('open-msg2'), report.contentChecked ? t('verifyOk', report.blocksOk, report.filesOk) : t('verifyNoPw', report.blocksOk), 'ok');
+    else msg($('open-msg2'), t('verifyBad') + ' ' + [...report.blocksBad, ...report.filesBad].join('; '));
+  } catch (e) { msg($('open-msg2'), e.message); }
+  bar.hidden = true; bar.classList.remove('busy');
+};
+
+$('dl-all').onclick = async () => {
+  if (!lastOpen) return;
+  msg($('open-msg2'), '');
+  const files = lastOpen.entries.filter((e) => e.type === 'file').sort((x, y) => x.block - y.block || (x.path < y.path ? -1 : 1));
+  const dirs = lastOpen.entries.filter((e) => e.type === 'dir');
+  const links = lastOpen.entries.filter((e) => e.type === 'symlink').length;
+  const bar = $('open-bar'); bar.hidden = false; const fill = bar.firstElementChild;
+  try {
+    const zip = new ZipWriter();
+    for (const d of dirs) zip.add(d.path + '/', null, d.mtime);
+    let i = 0;
+    while (i < files.length) {
+      const batch = [];
+      let bytes = 0;
+      while (i < files.length && batch.length < 64 && (bytes === 0 || bytes + files[i].size <= 64e6)) { bytes += files[i].size; batch.push(files[i++]); }
+      const r = await call('read', { paths: batch.map((e) => e.path) });
+      r.files.forEach((f, k) => zip.add(f.path, new Uint8Array(f.data), batch[k].mtime));
+      fill.style.width = `${(i / files.length) * 100}%`;
+      $('open-msg2').innerHTML = `<p class="muted">${esc(t('extracting', i, files.length))}</p>`;
+    }
+    save(zip.finish(), lastOpen.name.replace(/\.ezpz$/i, '') + '.zip');
+    msg($('open-msg2'), t('zipped', files.length) + (links ? ' ' + t('symlinkSkipped', links) : ''), 'ok');
+  } catch (e) { msg($('open-msg2'), e.message === 'zip-limit' ? t('zipLimit') : e.message); }
+  bar.hidden = true; fill.style.width = '0';
+};
+
+// Minimal .zip writer (stored, UTF-8 names), for "Download all".
+class ZipWriter {
+  constructor() { this.parts = []; this.central = []; this.offset = 0; this.count = 0; }
+  static crcTable() {
+    if (ZipWriter.table) return ZipWriter.table;
+    const tb = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; tb[n] = c >>> 0; }
+    return (ZipWriter.table = tb);
+  }
+  static crc(data) { const tb = ZipWriter.crcTable(); let c = 0xffffffff; for (let i = 0; i < data.length; i++) c = tb[(c ^ data[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+  add(path, data, mtimeSec) {
+    const name = new TextEncoder().encode(path);
+    const size = data ? data.length : 0;
+    if (size >= 0xffffffff || this.offset + size + 100 >= 0xffffffff || this.count >= 0xffff) throw new Error('zip-limit');
+    const d = new Date((mtimeSec || 0) * 1000);
+    const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+    const date = (Math.max(d.getFullYear() - 1980, 0) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+    const crc = data ? ZipWriter.crc(data) : 0;
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0x0800, true);
+    local.setUint16(8, 0, true); local.setUint16(10, time, true); local.setUint16(12, date, true);
+    local.setUint32(14, crc, true); local.setUint32(18, size, true); local.setUint32(22, size, true);
+    local.setUint16(26, name.length, true); local.setUint16(28, 0, true);
+    const cen = new DataView(new ArrayBuffer(46));
+    cen.setUint32(0, 0x02014b50, true); cen.setUint16(4, 20, true); cen.setUint16(6, 20, true); cen.setUint16(8, 0x0800, true);
+    cen.setUint16(10, 0, true); cen.setUint16(12, time, true); cen.setUint16(14, date, true); cen.setUint32(16, crc, true);
+    cen.setUint32(20, size, true); cen.setUint32(24, size, true); cen.setUint16(28, name.length, true);
+    cen.setUint32(38, path.endsWith('/') ? 0x10 : 0, true); cen.setUint32(42, this.offset, true);
+    this.parts.push(local, name); if (data) this.parts.push(data);
+    this.central.push(cen, name);
+    this.offset += 30 + name.length + size; this.count++;
+  }
+  finish() {
+    const cenSize = this.central.reduce((s, p) => s + p.byteLength, 0);
+    const end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(8, this.count, true); end.setUint16(10, this.count, true);
+    end.setUint32(12, cenSize, true); end.setUint32(16, this.offset, true);
+    return new Blob([...this.parts, ...this.central, end], { type: 'application/zip' });
+  }
+}
+
+// ---- create
+let selection = [];
+$('add-files').onclick = () => $('files-input').click();
+$('add-folder').onclick = () => $('folder-input').click();
+$('files-input').onchange = () => { addFiles([...$('files-input').files].map((f) => ({ path: f.name, file: f }))); $('files-input').value = ''; };
+$('folder-input').onchange = () => { addFiles([...$('folder-input').files].map((f) => ({ path: f.webkitRelativePath || f.name, file: f }))); $('folder-input').value = ''; };
+dropZone($('create-drop'), async (dt) => {
+  const items = [...(dt.items || [])].map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
+  if (!items.length) { addFiles([...dt.files].map((f) => ({ path: f.name, file: f }))); return; }
+  const out = [];
+  for (const it of items) await walkEntry(it, out);
+  addFiles(out);
+});
+async function walkEntry(entry, out) {
+  const path = entry.fullPath.replace(/^\/+/, '');
+  if (entry.isFile) {
+    out.push({ path, file: await new Promise((res, rej) => entry.file(res, rej)) });
+  } else if (entry.isDirectory) {
+    out.push({ path, dir: true });
+    const reader = entry.createReader();
+    for (;;) {
+      const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+      if (!batch.length) break;
+      for (const e of batch) await walkEntry(e, out);
+    }
+  }
+}
+function addFiles(list) {
+  const known = new Set(selection.map((s) => s.path));
+  for (const s of list) if (s.path && !known.has(s.path)) { selection.push(s); known.add(s.path); }
+  if (selection.length && $('create-name').value === 'archive') {
+    const top = new Set(selection.map((s) => s.path.split('/')[0]));
+    if (top.size === 1 && selection.some((s) => s.path.includes('/'))) $('create-name').value = [...top][0];
+  }
+  renderSelection();
+}
+function renderSelection() {
+  const files = selection.filter((s) => !s.dir);
+  $('sel').hidden = !selection.length;
+  $('create-btn').disabled = !files.length;
+  if (!selection.length) return;
+  const size = files.reduce((s, f) => s + f.file.size, 0);
+  $('sel-count').textContent = t('selected', files.length, fmtSize(size));
+  const shown = files.slice(0, 200);
+  let html = shown.map((f) => `<tr><td class="name">${esc(f.path)}</td><td class="num">${fmtSize(f.file.size)}</td></tr>`).join('');
+  if (files.length > shown.length) html += `<tr><td class="muted" colspan="2">${esc(t('moreRows', files.length - shown.length))}</td></tr>`;
+  $('sel-list').innerHTML = html;
+}
+$('sel-clear').onclick = () => { selection = []; $('create-name').value = 'archive'; renderSelection(); msg($('create-msg'), ''); };
+
+$('create-btn').onclick = async () => {
+  await ready;
+  msg($('create-msg'), '');
+  const level = Number(document.querySelector('input[name=level]:checked').value);
+  const password = $('create-pw').value;
+  const name = ($('create-name').value.trim() || 'archive').replace(/[\\/:*?"<>|]+/g, '_').replace(/\.ezpz$/i, '') + '.ezpz';
+  const btn = $('create-btn'); btn.disabled = true;
+  const bar = $('create-bar'); bar.hidden = false; bar.classList.add('busy'); const fill = bar.firstElementChild;
+  const t0 = performance.now();
+  const timer = setInterval(() => { $('create-time').textContent = t('working') + ' ' + t('elapsed', ((performance.now() - t0) / 1000).toFixed(0)); }, 500);
+  try {
+    const files = [], transfer = [];
+    let rawSize = 0;
+    for (const s of selection) {
+      if (s.dir) { files.push({ path: s.path, dir: true }); continue; }
+      const data = await s.file.arrayBuffer();
+      rawSize += data.byteLength;
+      files.push({ path: s.path, data, mtime: s.file.lastModified });
+      transfer.push(data);
+    }
+    const r = await call('create', { files, options: { level, password } }, transfer, (done, total) => {
+      bar.classList.remove('busy');
+      fill.style.width = `${total ? (done / total) * 100 : 100}%`;
+    });
+    const blob = new Blob([r.bytes], { type: 'application/octet-stream' });
+    save(blob, name);
+    msg($('create-msg'), t('done', name, fmtSize(rawSize), fmtSize(blob.size), pctText(rawSize, blob.size)), 'ok');
+  } catch (e) { msg($('create-msg'), e.message); }
+  clearInterval(timer);
+  $('create-time').textContent = t('elapsed', ((performance.now() - t0) / 1000).toFixed(1));
+  bar.hidden = true; bar.classList.remove('busy'); fill.style.width = '0';
+  btn.disabled = false;
+};
+
+applyLang();
+</script>
+</body>
+</html>

@@ -824,7 +824,6 @@ At levels 1 to 9, blocks of up to 1 MiB are also tried with codec 5 (§6.6). Blo
 - **Recovery records**: Reed-Solomon parity blocks that repair partial damage.
 - **Append**: add files to an existing archive while deduplicating against the chunks already stored.
 - **Deflate recompression**: decompress the deflate streams inside zip, docx, and png files to compress them better, and restore the original bytes exactly on extraction.
-- **Browser decoder**: open archives directly on the web with WebAssembly.
 - **Streaming read**: a mode that can be decoded in order without seeking.
 
 ## Appendix A. Independent implementation check

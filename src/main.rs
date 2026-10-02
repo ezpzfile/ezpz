@@ -1,13 +1,4 @@
-mod archive;
-mod brain;
-mod classify;
-mod codec;
-mod create;
-mod crypto;
-mod filter;
-mod format;
-mod index;
-
+use ezpz::{archive, brain, create, filter, format, index};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
 use create::CodecChoice;
@@ -304,6 +295,7 @@ fn run() -> Result<()> {
                 dedup: !no_dedup,
                 filters: !no_filter,
                 verbose,
+                created: None,
             };
             let s = create::create(&archive, &inputs, &opts)?;
             if json {

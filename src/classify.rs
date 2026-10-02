@@ -2,7 +2,6 @@
 //! detect machine code. None of this is needed to *read* an archive.
 
 use crate::filter::{XF_ARM64, XF_NONE, XF_X86, XF_X86_64_SPLIT};
-use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum Class {
@@ -160,8 +159,7 @@ fn compressed_magic(s: &[u8]) -> bool {
 }
 
 /// Returns (class, transform).
-pub fn classify(path: &Path, rel: &str, sample: &[u8], use_filters: bool) -> (Class, u8) {
-    let _ = path;
+pub fn classify(rel: &str, sample: &[u8], use_filters: bool) -> (Class, u8) {
     let ext = extension(rel);
     if let Some(xf) = detect_exec(sample) {
         return (Class::Exec, if use_filters { xf } else { XF_NONE });

@@ -1,4 +1,5 @@
-//! Archive writer.
+//! Archive writer. Input comes from files on disk (`create`) or from a list of files held in
+//! memory (`create_in_memory`, used by the WebAssembly build); both share one pipeline.
 
 use crate::classify::{self, Class};
 use crate::brain::Profile;
@@ -6,18 +7,26 @@ use crate::codec::{self, Plan};
 use crate::format::*;
 use crate::index::*;
 use crate::{crypto, filter};
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(not(target_arch = "wasm32"))]
+use anyhow::Context;
+use anyhow::{Result, anyhow, bail};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{BufWriter, Read};
+use std::io::Write;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const CDC_MIN: u32 = 16 * 1024;
 pub const CDC_AVG: u32 = 64 * 1024;
 pub const CDC_MAX: u32 = 256 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
 const WHOLE_READ_LIMIT: u64 = 64 << 20;
 pub const DEFAULT_LEVEL: u8 = 7;
 
@@ -44,6 +53,9 @@ pub struct CreateOptions {
     pub dedup: bool,
     pub filters: bool,
     pub verbose: bool,
+    /// Creation time stored in the catalog (Unix seconds). None = now. The WebAssembly build
+    /// has no clock of its own, so its caller passes the time.
+    pub created: Option<i64>,
 }
 
 #[derive(Default, Debug)]
@@ -61,6 +73,9 @@ pub struct Stats {
 }
 
 pub const MAX_LEVEL: u8 = 11;
+
+/// liblzma's LZMA_PRESET_EXTREME flag (`9 | PRESET_EXTREME` = `xz -9e`).
+const PRESET_EXTREME: u32 = 0x8000_0000;
 
 /// (plan, block size) for a level.
 /// 10 = `--max`: fast brain codec with 16 MiB blocks, so several cores work at once.
@@ -80,9 +95,9 @@ pub fn level_params(level: u8, choice: CodecChoice, brain_mask: Option<u16>) -> 
         6 => (16, 7, mib(16)),
         7 => (19, 8, mib(32)),
         8 => (22, 9, mib(64)),
-        9 => (22, 9 | liblzma::stream::PRESET_EXTREME, mib(64)),
-        10 => (22, 9 | liblzma::stream::PRESET_EXTREME, mib(16)),
-        _ => (22, 9 | liblzma::stream::PRESET_EXTREME, mib(64)),
+        9 => (22, 9 | PRESET_EXTREME, mib(64)),
+        10 => (22, 9 | PRESET_EXTREME, mib(16)),
+        _ => (22, 9 | PRESET_EXTREME, mib(64)),
     };
     let plan = match choice {
         CodecChoice::Store => Plan::Store,
@@ -92,6 +107,8 @@ pub fn level_params(level: u8, choice: CodecChoice, brain_mask: Option<u16>) -> 
         CodecChoice::BrainFast => Plan::Brain(fast),
         CodecChoice::Auto => match level {
             0..=8 => Plan::Zstd(zl),
+            // The WebAssembly build has no LZMA2 encoder: level 9 is zstd 22 alone there.
+            9 if cfg!(target_arch = "wasm32") => Plan::Zstd(zl),
             9 => Plan::Auto { zstd: zl, lzma: lz },
             10 => Plan::Brain(fast),
             _ => Plan::Brain(Profile::Full),
@@ -100,8 +117,17 @@ pub fn level_params(level: u8, choice: CodecChoice, brain_mask: Option<u16>) -> 
     (plan, bs)
 }
 
+/// Where a file's content comes from.
+enum Src {
+    #[cfg(not(target_arch = "wasm32"))]
+    Path(PathBuf),
+    Mem(Vec<u8>),
+    /// Directories and symbolic links.
+    None,
+}
+
 struct Item {
-    abs: PathBuf,
+    src: Src,
     rel: String,
     kind: ItemKind,
     mode: u32,
@@ -118,6 +144,35 @@ enum ItemKind {
     Symlink(String),
 }
 
+impl Item {
+    /// The first `n` bytes, for classification. Unreadable files give an empty sample here and
+    /// fail later with a proper error.
+    fn sample(&self, n: usize) -> Vec<u8> {
+        match &self.src {
+            #[cfg(not(target_arch = "wasm32"))]
+            Src::Path(p) => {
+                let mut sample = vec![0u8; n.min(self.size as usize)];
+                let k = File::open(p).and_then(|mut f| read_full(&mut f, &mut sample)).unwrap_or(0);
+                sample.truncate(k);
+                sample
+            }
+            Src::Mem(d) => d[..n.min(d.len())].to_vec(),
+            Src::None => Vec::new(),
+        }
+    }
+
+    /// The whole content (a copy for files held in memory).
+    fn read_all(&self) -> Result<Vec<u8>> {
+        match &self.src {
+            #[cfg(not(target_arch = "wasm32"))]
+            Src::Path(p) => Ok(fs::read(p).with_context(|| format!("cannot read {}", p.display()))?),
+            Src::Mem(d) => Ok(d.clone()),
+            Src::None => Ok(Vec::new()),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn mtime_of(m: &fs::Metadata) -> (i64, u32) {
     match m.modified() {
         Ok(t) => match t.duration_since(UNIX_EPOCH) {
@@ -135,12 +190,12 @@ fn mtime_of(m: &fs::Metadata) -> (i64, u32) {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_arch = "wasm32")))]
 fn mode_of(m: &fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     m.permissions().mode() & 0o7777
 }
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
 fn mode_of(m: &fs::Metadata) -> u32 {
     if m.is_dir() {
         0o755
@@ -151,6 +206,7 @@ fn mode_of(m: &fs::Metadata) -> u32 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn collect(inputs: &[PathBuf], skip: &HashSet<PathBuf>, verbose: bool) -> Result<Vec<Item>> {
     let mut items = Vec::new();
     let mut seen = HashSet::new();
@@ -222,7 +278,7 @@ fn collect(inputs: &[PathBuf], skip: &HashSet<PathBuf>, verbose: bool) -> Result
                 continue;
             };
             items.push(Item {
-                abs: p.to_path_buf(),
+                src: if ft.is_file() { Src::Path(p.to_path_buf()) } else { Src::None },
                 rel,
                 kind,
                 mode: mode_of(&m),
@@ -244,7 +300,7 @@ struct RawBlock {
     plan: Plan,
 }
 
-struct Producer {
+struct Producer<'e, 'p> {
     block_size: usize,
     dedup: bool,
     seen: HashMap<[u8; 32], u32>,
@@ -254,12 +310,17 @@ struct Producer {
     next_chunk: u32,
     next_block: u32,
     plan: Plan,
-    tx: mpsc::SyncSender<RawBlock>,
+    /// Receives each finished block: a channel to the compression thread, or the sealer itself.
+    emit: &'e mut dyn FnMut(RawBlock) -> Result<()>,
     unique_bytes: u64,
     dedup_bytes: u64,
+    /// Input bytes seen so far (including duplicates) and in total, for `progress`.
+    consumed: u64,
+    total: u64,
+    progress: Option<&'p mut dyn FnMut(u64, u64)>,
 }
 
-impl Producer {
+impl Producer<'_, '_> {
     fn add_chunk(&mut self, c: &[u8]) -> Result<u32> {
         let h = if self.dedup {
             Some(*blake3::hash(c).as_bytes())
@@ -269,6 +330,7 @@ impl Producer {
         if let Some(h) = &h {
             if let Some(&id) = self.seen.get(h) {
                 self.dedup_bytes += c.len() as u64;
+                self.consumed += c.len() as u64;
                 return Ok(id);
             }
         }
@@ -283,6 +345,7 @@ impl Producer {
         self.cur.extend_from_slice(c);
         self.lens.push(c.len() as u32);
         self.unique_bytes += c.len() as u64;
+        self.consumed += c.len() as u64;
         if let Some(h) = h {
             self.seen.insert(h, id);
         }
@@ -309,15 +372,16 @@ impl Producer {
         } else {
             self.plan
         };
-        self.tx
-            .send(RawBlock {
-                id: self.next_block,
-                data,
-                lens,
-                plan,
-            })
-            .map_err(|_| anyhow!("compression worker stopped"))?;
+        (self.emit)(RawBlock {
+            id: self.next_block,
+            data,
+            lens,
+            plan,
+        })?;
         self.next_block += 1;
+        if let Some(f) = self.progress.as_mut() {
+            f(self.consumed, self.total);
+        }
         Ok(())
     }
 }
@@ -370,7 +434,7 @@ fn choose_x86_64_transform(items: &mut [Item], verbose: bool) {
         };
         let (mut a, mut b) = (enc()?, enc()?);
         for &i in &idx {
-            let mut t4 = fs::read(&items[i].abs)?;
+            let mut t4 = items[i].read_all()?;
             let mut t3 = t4.clone();
             let (ra, rb) = rayon::join(
                 || {
@@ -402,55 +466,93 @@ fn choose_x86_64_transform(items: &mut [Item], verbose: bool) {
 
 /// Returns the chunk ids, the file hash, and the transform actually used.
 fn process_file(p: &mut Producer, it: &Item, hash_len: usize) -> Result<(Vec<u32>, Vec<u8>, u8)> {
-    let mut f = File::open(&it.abs).with_context(|| format!("cannot open {}", it.abs.display()))?;
     let mut hasher = blake3::Hasher::new();
     let mut ids = Vec::new();
-    let mut used = it.transform;
-    if it.transform != filter::XF_NONE || it.size <= WHOLE_READ_LIMIT {
-        let mut buf = Vec::with_capacity(it.size as usize);
-        f.read_to_end(&mut buf)?;
-        hasher.update(&buf);
-        if used == filter::XF_X86_64_SPLIT || used == filter::XF_X86_64 {
-            // Safety net: decoding must give back the exact input. It always should,
-            // but if it ever did not, fall back to transform 3 and then to the plain
-            // x86 transform, which is reversible for any input.
-            let before = blake3::hash(&buf);
-            let mut chain = vec![used];
-            if used == filter::XF_X86_64_SPLIT {
-                chain.push(filter::XF_X86_64);
-            }
-            used = filter::XF_X86;
-            for xf in chain {
-                filter::encode(xf, &mut buf);
-                let encoded = buf.clone();
-                filter::decode(xf, &mut buf);
-                if blake3::hash(&buf) == before {
-                    buf = encoded;
-                    used = xf;
-                    break;
+    let used = match &it.src {
+        #[cfg(not(target_arch = "wasm32"))]
+        Src::Path(path) => {
+            let mut f = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+            if it.transform != filter::XF_NONE || it.size <= WHOLE_READ_LIMIT {
+                let mut buf = Vec::with_capacity(it.size as usize);
+                f.read_to_end(&mut buf)?;
+                hasher.update(&buf);
+                let reread = || -> Result<Vec<u8>> {
+                    let mut b = Vec::new();
+                    File::open(path)?.read_to_end(&mut b)?;
+                    Ok(b)
+                };
+                chunk_whole(p, it.transform, buf, &reread, &mut ids)?
+            } else {
+                for c in fastcdc::v2020::StreamCDC::new(f, CDC_MIN, CDC_AVG, CDC_MAX) {
+                    let c = c.map_err(|e| anyhow!("reading {}: {e:?}", path.display()))?;
+                    hasher.update(&c.data);
+                    ids.push(p.add_chunk(&c.data)?);
                 }
-                buf.clear();
-                File::open(&it.abs)?.read_to_end(&mut buf)?;
-            }
-            if used == filter::XF_X86 {
-                filter::encode(used, &mut buf);
-            }
-        } else {
-            filter::encode(used, &mut buf);
-        }
-        if !buf.is_empty() {
-            for c in fastcdc::v2020::FastCDC::new(&buf, CDC_MIN, CDC_AVG, CDC_MAX) {
-                ids.push(p.add_chunk(&buf[c.offset..c.offset + c.length])?);
+                filter::XF_NONE
             }
         }
-    } else {
-        for c in fastcdc::v2020::StreamCDC::new(f, CDC_MIN, CDC_AVG, CDC_MAX) {
-            let c = c.map_err(|e| anyhow!("reading {}: {e:?}", it.abs.display()))?;
-            hasher.update(&c.data);
-            ids.push(p.add_chunk(&c.data)?);
+        Src::Mem(data) => {
+            hasher.update(data);
+            if it.transform == filter::XF_NONE {
+                chunk_slice(p, data, &mut ids)?;
+                filter::XF_NONE
+            } else {
+                chunk_whole(p, it.transform, data.clone(), &|| Ok(data.clone()), &mut ids)?
+            }
+        }
+        Src::None => filter::XF_NONE,
+    };
+    Ok((ids, hasher.finalize().as_bytes()[..hash_len].to_vec(), used))
+}
+
+fn chunk_slice(p: &mut Producer, buf: &[u8], ids: &mut Vec<u32>) -> Result<()> {
+    if !buf.is_empty() {
+        for c in fastcdc::v2020::FastCDC::new(buf, CDC_MIN, CDC_AVG, CDC_MAX) {
+            ids.push(p.add_chunk(&buf[c.offset..c.offset + c.length])?);
         }
     }
-    Ok((ids, hasher.finalize().as_bytes()[..hash_len].to_vec(), used))
+    Ok(())
+}
+
+/// Applies transform `xf` to a whole file and chunks it. `original` gives the untransformed
+/// content again if the safety check below has to start over. Returns the transform used.
+fn chunk_whole(
+    p: &mut Producer,
+    xf: u8,
+    mut buf: Vec<u8>,
+    original: &dyn Fn() -> Result<Vec<u8>>,
+    ids: &mut Vec<u32>,
+) -> Result<u8> {
+    let mut used = xf;
+    if used == filter::XF_X86_64_SPLIT || used == filter::XF_X86_64 {
+        // Safety net: decoding must give back the exact input. It always should,
+        // but if it ever did not, fall back to transform 3 and then to the plain
+        // x86 transform, which is reversible for any input.
+        let before = blake3::hash(&buf);
+        let mut chain = vec![used];
+        if used == filter::XF_X86_64_SPLIT {
+            chain.push(filter::XF_X86_64);
+        }
+        used = filter::XF_X86;
+        for t in chain {
+            filter::encode(t, &mut buf);
+            let encoded = buf.clone();
+            filter::decode(t, &mut buf);
+            if blake3::hash(&buf) == before {
+                buf = encoded;
+                used = t;
+                break;
+            }
+            buf = original()?;
+        }
+        if used == filter::XF_X86 {
+            filter::encode(used, &mut buf);
+        }
+    } else {
+        filter::encode(used, &mut buf);
+    }
+    chunk_slice(p, &buf, ids)?;
+    Ok(used)
 }
 
 struct Sealed {
@@ -515,53 +617,8 @@ fn make_frame(
     Ok(v)
 }
 
-pub fn create(out: &Path, inputs: &[PathBuf], o: &CreateOptions) -> Result<Stats> {
-    let t0 = Instant::now();
-    let (plan, default_bs) = level_params(o.level, o.codec, o.brain_mask);
-    let block_size = o
-        .block_size
-        .unwrap_or(default_bs)
-        .clamp(1 << 20, MAX_BLOCK_RAW as usize - CDC_MAX as usize);
-
-    // Output goes to a temp file first, renamed at the end.
-    let out_dir = match out.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    };
-    let out_name = out
-        .file_name()
-        .ok_or_else(|| anyhow!("bad output path"))?
-        .to_string_lossy()
-        .to_string();
-    let tmp = out_dir.join(format!(".{out_name}.partial-{}", std::process::id()));
-    let mut skip = HashSet::new();
-    if let Ok(d) = fs::canonicalize(&out_dir) {
-        skip.insert(d.join(&out_name));
-        skip.insert(d.join(tmp.file_name().unwrap()));
-    }
-
-    let mut items = collect(inputs, &skip, o.verbose)?;
-    ensure_nonempty(&items)?;
-
-    // Classify files (reads a 64 KiB sample of each).
-    items
-        .par_iter_mut()
-        .filter(|i| matches!(i.kind, ItemKind::File))
-        .for_each(|it| {
-            let mut sample = vec![0u8; 65536.min(it.size as usize)];
-            let n = File::open(&it.abs)
-                .and_then(|mut f| read_full(&mut f, &mut sample))
-                .unwrap_or(0);
-            sample.truncate(n);
-            let (c, xf) = classify::classify(&it.abs, &it.rel, &sample, o.filters);
-            it.class = c;
-            it.transform = xf;
-        });
-    if o.level >= 4 {
-        choose_x86_64_transform(&mut items, o.verbose);
-    }
-
-    // Header
+/// Random archive id, plus the key and encryption record when a password is set.
+fn new_header(o: &CreateOptions) -> Result<(Header, [u8; 16], Option<[u8; 32]>)> {
     let mut archive_id = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut archive_id);
     let mut flags = 0u16;
@@ -585,10 +642,68 @@ pub fn create(out: &Path, inputs: &[PathBuf], o: &CreateOptions) -> Result<Stats
     if o.signing_key.is_some() {
         flags |= HF_SIGNED;
     }
-    let header = Header::build(flags, archive_id, enc);
+    Ok((Header::build(flags, archive_id, enc), archive_id, key))
+}
+
+/// Classifies files (from a 64 KiB sample of each) and picks the x86-64 transform.
+fn classify_items(items: &mut [Item], o: &CreateOptions) {
+    items
+        .par_iter_mut()
+        .filter(|i| matches!(i.kind, ItemKind::File))
+        .for_each(|it| {
+            let sample = it.sample(65536);
+            let (c, xf) = classify::classify(&it.rel, &sample, o.filters);
+            it.class = c;
+            it.transform = xf;
+        });
+    if o.level >= 4 {
+        choose_x86_64_transform(items, o.verbose);
+    }
+}
+
+fn block_size_for(o: &CreateOptions, default_bs: usize) -> usize {
+    o.block_size
+        .unwrap_or(default_bs)
+        .clamp(1 << 20, MAX_BLOCK_RAW as usize - CDC_MAX as usize)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn create(out: &Path, inputs: &[PathBuf], o: &CreateOptions) -> Result<Stats> {
+    let t0 = Instant::now();
+    let (plan, default_bs) = level_params(o.level, o.codec, o.brain_mask);
+    let block_size = block_size_for(o, default_bs);
+
+    // Output goes to a temp file first, renamed at the end.
+    let out_dir = match out.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let out_name = out
+        .file_name()
+        .ok_or_else(|| anyhow!("bad output path"))?
+        .to_string_lossy()
+        .to_string();
+    let tmp = out_dir.join(format!(".{out_name}.partial-{}", std::process::id()));
+    let mut skip = HashSet::new();
+    if let Ok(d) = fs::canonicalize(&out_dir) {
+        skip.insert(d.join(&out_name));
+        skip.insert(d.join(tmp.file_name().unwrap()));
+    }
+
+    let mut items = collect(inputs, &skip, o.verbose)?;
+    ensure_nonempty(&items)?;
+    classify_items(&mut items, o);
+    let (header, archive_id, key) = new_header(o)?;
 
     let file = File::create(&tmp).with_context(|| format!("cannot create {}", tmp.display()))?;
-    let res = write_body(file, &header, &items, o, plan, block_size, key, archive_id);
+    let w = BufWriter::with_capacity(1 << 20, file);
+    let res = write_body(w, &header, &items, o, plan, block_size, key, archive_id, None).and_then(|(st, w)| {
+        let f = w
+            .into_inner()
+            .map_err(|e| anyhow!("write failed: {}", e.error()))?;
+        f.sync_all()?;
+        Ok(st)
+    });
     match res {
         Ok(mut st) => {
             fs::rename(&tmp, out)
@@ -603,9 +718,153 @@ pub fn create(out: &Path, inputs: &[PathBuf], o: &CreateOptions) -> Result<Stats
     }
 }
 
+/// A file, folder, or symbolic link for `create_in_memory`.
+pub struct MemEntry {
+    /// Path inside the archive, '/' separated (SPEC.md §8 rules apply).
+    pub path: String,
+    pub kind: MemKind,
+    /// Unix permission bits; 0 means 0o644 for files and links, 0o755 for folders.
+    pub mode: u32,
+    pub mtime_s: i64,
+    pub mtime_ns: u32,
+}
+
+pub enum MemKind {
+    File(Vec<u8>),
+    Dir,
+    Symlink(String),
+}
+
+/// Creates an archive from files held in memory and returns its bytes. Folders that contain
+/// a listed path but are not listed themselves are added. Runs on the calling thread only
+/// (the WebAssembly build has no threads); `progress` gets (input bytes done, input total)
+/// after each block.
+pub fn create_in_memory(
+    entries: Vec<MemEntry>,
+    o: &CreateOptions,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<(Vec<u8>, Stats)> {
+    let (plan, default_bs) = level_params(o.level, o.codec, o.brain_mask);
+    let block_size = block_size_for(o, default_bs);
+
+    let mut items = Vec::with_capacity(entries.len());
+    let mut seen = HashSet::new();
+    let mut dirs_needed: Vec<(String, i64, u32)> = Vec::new();
+    for e in entries {
+        validate_path(&e.path)?;
+        if !seen.insert(e.path.clone()) {
+            bail!("duplicate path in archive: {}", e.path);
+        }
+        let mut cut = 0;
+        while let Some(i) = e.path[cut..].find('/') {
+            dirs_needed.push((e.path[..cut + i].to_string(), e.mtime_s, e.mtime_ns));
+            cut += i + 1;
+        }
+        let (kind, src, size, default_mode) = match e.kind {
+            MemKind::File(d) => {
+                let n = d.len() as u64;
+                (ItemKind::File, Src::Mem(d), n, 0o644)
+            }
+            MemKind::Dir => (ItemKind::Dir, Src::None, 0, 0o755),
+            MemKind::Symlink(t) => {
+                if t.is_empty() {
+                    bail!("symbolic link {} has an empty target", e.path);
+                }
+                (ItemKind::Symlink(t), Src::None, 0, 0o644)
+            }
+        };
+        items.push(Item {
+            src,
+            rel: e.path,
+            kind,
+            mode: if e.mode == 0 { default_mode } else { e.mode & 0o7777 },
+            mtime_s: e.mtime_s,
+            mtime_ns: e.mtime_ns,
+            size,
+            class: Class::Compressible,
+            transform: 0,
+        });
+    }
+    for (d, s, ns) in dirs_needed {
+        if seen.insert(d.clone()) {
+            items.push(Item {
+                src: Src::None,
+                rel: d,
+                kind: ItemKind::Dir,
+                mode: 0o755,
+                mtime_s: s,
+                mtime_ns: ns,
+                size: 0,
+                class: Class::Compressible,
+                transform: 0,
+            });
+        }
+    }
+    ensure_nonempty(&items)?;
+    classify_items(&mut items, o);
+    let (header, archive_id, key) = new_header(o)?;
+    let one_thread = CreateOptions { threads: 1, ..clone_opts(o) };
+    let (mut st, out) = write_body(
+        Vec::new(),
+        &header,
+        &items,
+        &one_thread,
+        plan,
+        block_size,
+        key,
+        archive_id,
+        progress,
+    )?;
+    st.archive_bytes = out.len() as u64;
+    Ok((out, st))
+}
+
+fn clone_opts(o: &CreateOptions) -> CreateOptions {
+    CreateOptions {
+        level: o.level,
+        codec: o.codec,
+        brain_mask: o.brain_mask,
+        block_size: o.block_size,
+        threads: o.threads,
+        password: o.password.clone(),
+        signing_key: o.signing_key.clone(),
+        hash_len: o.hash_len,
+        dedup: o.dedup,
+        filters: o.filters,
+        verbose: o.verbose,
+        created: o.created,
+    }
+}
+
+/// Seals blocks in order and writes their frames.
+struct Sealer<W: Write> {
+    w: W,
+    key: Option<[u8; 32]>,
+    archive_id: [u8; 16],
+    entries: Vec<BlockEntry>,
+    lens_all: Vec<Vec<u32>>,
+    counts: [u64; 6],
+    offset: u64,
+}
+
+impl<W: Write> Sealer<W> {
+    fn write_sealed(&mut self, s: Sealed, lens: Vec<u32>) -> Result<()> {
+        self.w.write_all(&s.frame)?;
+        self.offset += s.frame.len() as u64;
+        self.counts[s.codec.min(5) as usize] += 1;
+        self.entries.push(s.entry);
+        self.lens_all.push(lens);
+        Ok(())
+    }
+    fn seal_now(&mut self, b: RawBlock) -> Result<()> {
+        let s = seal_block(&b, self.key.as_ref(), &self.archive_id)?;
+        self.write_sealed(s, b.lens)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn write_body(
-    file: File,
+fn write_body<W: Write + Send + 'static>(
+    mut w: W,
     header: &Header,
     items: &[Item],
     o: &CreateOptions,
@@ -613,61 +872,18 @@ fn write_body(
     block_size: usize,
     key: Option<[u8; 32]>,
     archive_id: [u8; 16],
-) -> Result<Stats> {
+    progress: Option<&mut dyn FnMut(u64, u64)>,
+) -> Result<(Stats, W)> {
     let mut st = Stats::default();
-    let mut w = BufWriter::with_capacity(1 << 20, file);
     w.write_all(&header.bytes)?;
-
-    // Compression worker: batches of blocks compressed in parallel, written in order.
-    let threads = o.threads.max(1);
-    let (tx, rx) = mpsc::sync_channel::<RawBlock>(threads * 2);
-    let header_len = header.bytes.len() as u64;
-    let worker = std::thread::spawn(move || -> Result<(BufWriter<File>, Vec<BlockEntry>, Vec<Vec<u32>>, [u64; 6], u64)> {
-        let mut entries = Vec::new();
-        let mut lens_all = Vec::new();
-        let mut counts = [0u64; 6];
-        let mut offset = header_len;
-        let mut done = false;
-        while !done {
-            let mut batch = Vec::with_capacity(threads);
-            while batch.len() < threads {
-                match rx.recv() {
-                    Ok(b) => batch.push(b),
-                    Err(_) => {
-                        done = true;
-                        break;
-                    }
-                }
-            }
-            if batch.is_empty() {
-                break;
-            }
-            let sealed: Vec<Result<Sealed>> = batch.par_iter().map(|b| seal_block(b, key.as_ref(), &archive_id)).collect();
-            for (s, b) in sealed.into_iter().zip(batch.into_iter()) {
-                let s = s?;
-                w.write_all(&s.frame)?;
-                offset += s.frame.len() as u64;
-                counts[s.codec.min(5) as usize] += 1;
-                entries.push(s.entry);
-                lens_all.push(b.lens);
-            }
-        }
-        Ok((w, entries, lens_all, counts, offset))
-    });
-
-    let mut prod = Producer {
-        block_size,
-        dedup: o.dedup,
-        seen: HashMap::new(),
-        cur: Vec::with_capacity(block_size + CDC_MAX as usize),
-        lens: Vec::new(),
-        cur_store: false,
-        next_chunk: 0,
-        next_block: 0,
-        plan,
-        tx,
-        unique_bytes: 0,
-        dedup_bytes: 0,
+    let sealer = Sealer {
+        w,
+        key,
+        archive_id,
+        entries: Vec::new(),
+        lens_all: Vec::new(),
+        counts: [0; 6],
+        offset: header.bytes.len() as u64,
     };
 
     // Storage order: similar files next to each other.
@@ -690,43 +906,98 @@ fn write_body(
     order.sort_by(|&a, &b| {
         (key_of(&items[a]), &items[a].rel).cmp(&(key_of(&items[b]), &items[b].rel))
     });
+    let total: u64 = order.iter().map(|&i| items[i].size).sum();
 
     let hash_len = o.hash_len as usize;
     let mut file_data: Vec<Option<(Vec<u32>, Vec<u8>, u8)>> = vec![None; items.len()];
-    let mut produce_err = None;
-    for &i in &order {
-        let it = &items[i];
-        let r = prod
-            .set_group(it.class == Class::Incompressible)
-            .and_then(|_| process_file(&mut prod, it, hash_len));
-        match r {
-            Ok(v) => {
-                st.input_bytes += it.size;
-                file_data[i] = Some(v);
-            }
-            Err(e) => {
-                produce_err = Some(e);
-                break;
-            }
+    let produce = |emit: &mut dyn FnMut(RawBlock) -> Result<()>,
+                   progress: Option<&mut dyn FnMut(u64, u64)>,
+                   file_data: &mut Vec<Option<(Vec<u32>, Vec<u8>, u8)>>,
+                   st: &mut Stats|
+     -> Result<()> {
+        let mut prod = Producer {
+            block_size,
+            dedup: o.dedup,
+            seen: HashMap::new(),
+            cur: Vec::with_capacity(block_size + CDC_MAX as usize),
+            lens: Vec::new(),
+            cur_store: false,
+            next_chunk: 0,
+            next_block: 0,
+            plan,
+            emit,
+            unique_bytes: 0,
+            dedup_bytes: 0,
+            consumed: 0,
+            total,
+            progress,
+        };
+        for &i in &order {
+            let it = &items[i];
+            prod.set_group(it.class == Class::Incompressible)?;
+            file_data[i] = Some(process_file(&mut prod, it, hash_len)?);
+            st.input_bytes += it.size;
         }
-    }
-    if produce_err.is_none() {
-        if let Err(e) = prod.flush() {
-            produce_err = Some(e);
+        prod.flush()?;
+        st.unique_bytes = prod.unique_bytes;
+        st.dedup_bytes = prod.dedup_bytes;
+        Ok(())
+    };
+
+    let threads = o.threads.max(1);
+    let mut sealer = if threads == 1 || cfg!(target_arch = "wasm32") {
+        // Seal each block as soon as it is full, on this thread.
+        let mut sealer = sealer;
+        let mut emit = |b: RawBlock| sealer.seal_now(b);
+        produce(&mut emit, progress, &mut file_data, &mut st)?;
+        sealer
+    } else {
+        {
+            // Compression worker: batches of blocks compressed in parallel, written in order.
+            let (tx, rx) = mpsc::sync_channel::<RawBlock>(threads * 2);
+            let mut sealer = sealer;
+            let worker = std::thread::spawn(move || -> Result<Sealer<W>> {
+                let mut done = false;
+                while !done {
+                    let mut batch = Vec::with_capacity(threads);
+                    while batch.len() < threads {
+                        match rx.recv() {
+                            Ok(b) => batch.push(b),
+                            Err(_) => {
+                                done = true;
+                                break;
+                            }
+                        }
+                    }
+                    if batch.is_empty() {
+                        break;
+                    }
+                    let (key, id) = (sealer.key, sealer.archive_id);
+                    let sealed: Vec<Result<Sealed>> =
+                        batch.par_iter().map(|b| seal_block(b, key.as_ref(), &id)).collect();
+                    for (s, b) in sealed.into_iter().zip(batch.into_iter()) {
+                        sealer.write_sealed(s?, b.lens)?;
+                    }
+                }
+                Ok(sealer)
+            });
+            let mut emit =
+                |b: RawBlock| tx.send(b).map_err(|_| anyhow!("compression worker stopped"));
+            let produced = produce(&mut emit, progress, &mut file_data, &mut st);
+            drop(tx);
+            let joined = worker
+                .join()
+                .map_err(|_| anyhow!("compression worker panicked"))?;
+            produced?;
+            joined?
         }
-    }
-    st.unique_bytes = prod.unique_bytes;
-    st.dedup_bytes = prod.dedup_bytes;
-    drop(prod);
-    let joined = worker
-        .join()
-        .map_err(|_| anyhow!("compression worker panicked"))?;
-    if let Some(e) = produce_err {
-        return Err(e);
-    }
-    let (mut w, block_entries, chunk_lens, counts, mut offset) = joined?;
-    st.codec_blocks = counts;
-    st.blocks = block_entries.len() as u64;
+    };
+    st.codec_blocks = sealer.counts;
+    st.blocks = sealer.entries.len() as u64;
+    let block_entries = std::mem::take(&mut sealer.entries);
+    let chunk_lens = std::mem::take(&mut sealer.lens_all);
+    let mut offset = sealer.offset;
+    let mut w = sealer.w;
 
     // Catalog entries, sorted by path.
     let mut entries: Vec<Entry> = Vec::with_capacity(items.len());
@@ -765,7 +1036,7 @@ fn write_body(
     };
     let catalog = Catalog {
         hash_len: o.hash_len,
-        created: now_unix(),
+        created: o.created.unwrap_or_else(now_unix),
         creator: format!("ezpz-rs {}", env!("CARGO_PKG_VERSION")),
         chunk_lens,
         entries,
@@ -808,12 +1079,9 @@ fn write_body(
         flags: tflags,
     };
     w.write_all(&tr.encode())?;
-    let f = w
-        .into_inner()
-        .map_err(|e| anyhow!("write failed: {}", e.error()))?;
-    f.sync_all()?;
+    w.flush()?;
     st.archive_bytes = archive_len;
-    Ok(st)
+    Ok((st, w))
 }
 
 fn ensure_nonempty(items: &[Item]) -> Result<()> {
@@ -823,6 +1091,7 @@ fn ensure_nonempty(items: &[Item]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
     let mut n = 0;
     while n < buf.len() {
@@ -835,9 +1104,16 @@ fn read_full(f: &mut File, buf: &mut [u8]) -> std::io::Result<usize> {
     Ok(n)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The WebAssembly build has no clock; callers pass `CreateOptions::created`.
+#[cfg(target_arch = "wasm32")]
+pub fn now_unix() -> i64 {
+    0
 }

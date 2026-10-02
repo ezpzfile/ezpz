@@ -7,7 +7,7 @@ ezpz compared with zip, tar.gz, tar.zst, tar.xz, and 7z on the same data.
 ## Test setup
 
 - A 2-core Intel Xeon 2.1 GHz virtual server (on the slow side), Linux. Every tool that supports threads ran with 2 threads (`zstd -T2`, `xz -T2`, `7z -mmt=2`, `ezpz -j2`).
-- Versions: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.4.0. On the Wikipedia text and the Silesia corpus, the ezpz rows come from earlier versions that write the same data for them: levels 3, 7, 9, and 11 from ezpz 0.1.0, and `--max` from ezpz 0.3.0.
+- Versions: zstd 1.5.5, XZ Utils 5.4.5, 7-Zip 23.01, Info-ZIP 3.0, gzip 1.12, GNU tar 1.35, ezpz 0.4.0 (0.5.0 writes the same data). On the Wikipedia text and the Silesia corpus, the ezpz rows come from earlier versions that write the same data for them: levels 3, 7, 9, and 11 from ezpz 0.1.0, and `--max` from ezpz 0.3.0.
 - Each measurement was taken once on an otherwise idle server, so expect a few percent of noise in the timings.
 - Sizes read original → compressed, in MB (1 MB = 1,000,000 bytes). The compressed size is the whole archive file, index included. "80% smaller" means the archive is one fifth the size of the original.
 - Single file is the time to extract one small file (for example `json/decoder.py`) from the archive. The tar formats have to be decompressed from the start to reach it.
