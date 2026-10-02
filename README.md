@@ -145,7 +145,7 @@ node web/test.mjs         # the WebAssembly build: reads every test vector, crea
 - On executables, 7z still beats the zstd and LZMA2 levels (`-l 9` is 1.7% larger). Only `-l 11` makes them smaller than 7z does.
 - Already-compressed data (jpg, mp4, zip, ...) barely shrinks with any method. ezpz recognizes such files and stores them as they are, which saves time.
 - Hash checks on an unsigned archive catch accidental damage such as transfer or disk errors. To detect deliberate changes too, sign the archive with `--sign` and have the recipient run `verify --pubkey`. When a public key is given, unsigned files are rejected.
-- This is a v1 draft and the format may still change. Do not use it as the only copy of important data.
+- The format was fixed at v1 with ezpz 1.0.0. Every later version will open v1 files, and new features are added only in ways that keep them opening.
 
 ## License
 

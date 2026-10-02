@@ -1,10 +1,10 @@
-# EZPZ archive format specification v1.0 (draft)
+# EZPZ archive format specification v1.0
 
 English | [한국어](SPEC.ko.md)
 
 - File extension: `.ezpz`
 - Media type (proposed): `application/x-ezpz`
-- Status: draft. The reference implementation is `ezpz` (Rust) in this repository.
+- Status: final. v1 was fixed with ezpz 1.0.0, and every later version reads v1 archives (§17). The reference implementation is `ezpz` (Rust) in this repository.
 - Date: 2026-10-02
 
 ---
@@ -815,10 +815,13 @@ At levels 1 to 9, blocks of up to 1 MiB are also tried with codec 5 (§6.6). Blo
 ## 17. Versioning and extensions
 
 - Incompatible changes increase version_major.
+- v1 was fixed with ezpz 1.0.0 (2026-10-02). Every later version of ezpz reads every valid v1 archive. Features added in v1.x arrive only in the ways listed next, so archives written by 1.0.0 keep opening.
 - New features are added as (a) new codec ids, (b) header extension records, with the critical bit if needed, or (c) new flag bits. Older decoders are designed to reject anything they do not understand, with a clear error, instead of silently producing wrong output.
-- Draft history: ezpz 0.2.0 (2026-10-02) added codec 4. ezpz 0.3.0 gave codec 4 its model mask (§6.5) and added transform 3 (§9). Blocks that 0.2.0 wrote with codec 4 cannot be read by later versions. ezpz 0.4.0 added codec 5 (§6.6) and transform 4 (§9); earlier versions reject archives that use them.
+- Before v1 was fixed: ezpz 0.2.0 (2026-10-02) added codec 4. ezpz 0.3.0 gave codec 4 its model mask (§6.5) and added transform 3 (§9). Blocks that 0.2.0 wrote with codec 4 cannot be read by later versions. ezpz 0.4.0 added codec 5 (§6.6) and transform 4 (§9); earlier versions reject archives that use them.
 
 ## 18. Future work (candidates for v1.x and later)
+
+Each of these will be added in a way that keeps v1 archives readable (§17).
 
 - **ARM64 split**: move BL targets out of the code, as transform 4 does for x86-64, for programs built for Apple Silicon and other ARM64 machines.
 - **Recovery records**: Reed-Solomon parity blocks that repair partial damage.

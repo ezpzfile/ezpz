@@ -1,6 +1,6 @@
 [package]
 name = "ezpz"
-version = "0.5.0"
+version = "1.0.0"
 edition = "2024"
 description = "Reference implementation of the .ezpz archive format (with a learning 'brain' codec)"
 license = "MIT"
